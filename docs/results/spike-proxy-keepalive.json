@@ -1,0 +1,134 @@
+{
+  "obs_version": "OBS 32.2.2 / obs-websocket 5.7.4",
+  "fps_target": 4.0,
+  "resolution": [
+    480,
+    270
+  ],
+  "main": {
+    "label": "main",
+    "keepalive": true,
+    "cams": {
+      "left": {
+        "source": "Proxy Left",
+        "selected": {
+          "samples": 84,
+          "failures": 0,
+          "fresh": 83,
+          "identical": 0,
+          "longest_identical_run": 0,
+          "obs_active": 84,
+          "mean_abs_diff": 57.80186,
+          "mean_luma": 127.74112,
+          "latency_ms": {
+            "n": 84,
+            "mean": 10.229777,
+            "p50": 8.9262,
+            "p95": 18.9735,
+            "max": 27.3563
+          }
+        },
+        "other_selected": {
+          "samples": 84,
+          "failures": 0,
+          "fresh": 84,
+          "identical": 0,
+          "longest_identical_run": 0,
+          "obs_active": 84,
+          "mean_abs_diff": 57.738033,
+          "mean_luma": 128.17032,
+          "latency_ms": {
+            "n": 84,
+            "mean": 9.800501,
+            "p50": 7.9568996,
+            "p95": 18.7239,
+            "max": 27.818499
+          }
+        },
+        "neither": {
+          "samples": 73,
+          "failures": 0,
+          "fresh": 73,
+          "identical": 0,
+          "longest_identical_run": 0,
+          "obs_active": 13,
+          "mean_abs_diff": 58.044968,
+          "mean_luma": 127.98144,
+          "latency_ms": {
+            "n": 73,
+            "mean": 9.424669,
+            "p50": 8.1798,
+            "p95": 16.8365,
+            "max": 19.000599
+          }
+        }
+      },
+      "right": {
+        "source": "Proxy Right",
+        "selected": {
+          "samples": 84,
+          "failures": 0,
+          "fresh": 84,
+          "identical": 0,
+          "longest_identical_run": 0,
+          "obs_active": 84,
+          "mean_abs_diff": 57.799805,
+          "mean_luma": 128.10414,
+          "latency_ms": {
+            "n": 84,
+            "mean": 9.945503,
+            "p50": 7.3123,
+            "p95": 20.0986,
+            "max": 59.190002
+          }
+        },
+        "other_selected": {
+          "samples": 84,
+          "failures": 0,
+          "fresh": 83,
+          "identical": 0,
+          "longest_identical_run": 0,
+          "obs_active": 84,
+          "mean_abs_diff": 57.746536,
+          "mean_luma": 127.67424,
+          "latency_ms": {
+            "n": 84,
+            "mean": 9.15303,
+            "p50": 7.2134004,
+            "p95": 18.032299,
+            "max": 20.9728
+          }
+        },
+        "neither": {
+          "samples": 73,
+          "failures": 0,
+          "fresh": 73,
+          "identical": 0,
+          "longest_identical_run": 0,
+          "obs_active": 13,
+          "mean_abs_diff": 58.049583,
+          "mean_luma": 127.91322,
+          "latency_ms": {
+            "n": 73,
+            "mean": 8.626582,
+            "p50": 7.4395003,
+            "p95": 17.1484,
+            "max": 19.3055
+          }
+        }
+      }
+    },
+    "scene_switch_ack_ms": {
+      "n": 21,
+      "mean": 35.301476,
+      "p50": 18.6506,
+      "p95": 134.1327,
+      "max": 149.83209
+    },
+    "achieved_fps_per_camera": 4.014427,
+    "reliable": true,
+    "reasons": []
+  },
+  "negative_control": null,
+  "verdict": "RELIABLE (keepalive on): use OBS GetSourceScreenshot + SetCurrentProgramScene"
+}

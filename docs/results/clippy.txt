@@ -1,0 +1,4 @@
+cargo clippy --all-targets --release -- -D warnings  ->  exit 0
+    Checking windows v0.62.2
+    Checking autocam v0.1.0 (<repo>)
+    Finished `release` profile [optimized + debuginfo] target(s) in 19.57s

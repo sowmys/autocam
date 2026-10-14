@@ -1,0 +1,62 @@
+{
+  "obs_version": "OBS 32.2.2 / obs-websocket 5.7.4",
+  "fps_target": 4.0,
+  "resolution": [
+    480,
+    270
+  ],
+  "main": {
+    "label": "main",
+    "sources": {
+      "AutoCam Left": {
+        "on_program": {
+          "samples": 261,
+          "failures": 0,
+          "fresh": 0,
+          "identical": 260,
+          "longest_identical_run": 260,
+          "mean_abs_diff": 0.0,
+          "mean_luma": 137.39561,
+          "latency_ms": {
+            "n": 261,
+            "mean": 14.083297,
+            "p50": 8.9374,
+            "p95": 10.8258,
+            "max": 450.81763
+          }
+        },
+        "off_program": {
+          "samples": 99,
+          "failures": 0,
+          "fresh": 0,
+          "identical": 99,
+          "longest_identical_run": 99,
+          "mean_abs_diff": 0.0,
+          "mean_luma": 137.39561,
+          "latency_ms": {
+            "n": 99,
+            "mean": 12.894406,
+            "p50": 8.5528,
+            "p95": 10.9471,
+            "max": 438.02402
+          }
+        }
+      }
+    },
+    "scene_switch_ack_ms": {
+      "n": 31,
+      "mean": 27.526083,
+      "p50": 28.553202,
+      "p95": 38.7092,
+      "max": 147.3154
+    },
+    "achieved_fps_per_source": 3.992622,
+    "reliable": false,
+    "reasons": [
+      "AutoCam Left on Program: only 0.0% fresh frames (longest identical run 260)",
+      "AutoCam Left off Program: only 0.0% fresh frames (longest identical run 99)"
+    ]
+  },
+  "negative_control": null,
+  "verdict": "UNRELIABLE: use native capture fallback (see docs/DESIGN.md)"
+}

@@ -1,0 +1,68 @@
+[
+  {
+    "params": {
+      "hours": 10.0,
+      "seed": 2,
+      "noise_deg": 3.0,
+      "outlier_p": 0.08,
+      "dropout_p": 0.3,
+      "monitor_yaw": [
+        22.0,
+        -22.0
+      ],
+      "mount_bias": [
+        4.0,
+        -6.0
+      ],
+      "fps": 4.0
+    },
+    "simulated_hours": 10.0,
+    "label_changes": 2889,
+    "auto_switches": 1587,
+    "correct_switches": 1587,
+    "false_switches": 0,
+    "false_switches_per_hour": 0.0,
+    "missed_switches": 12,
+    "latency_ms": {
+      "n": 1576,
+      "mean": 1842.6396,
+      "p50": 1500.0,
+      "p95": 3500.0,
+      "max": 5250.0
+    },
+    "calibration_warnings": []
+  },
+  {
+    "params": {
+      "hours": 10.0,
+      "seed": 2,
+      "noise_deg": 5.0,
+      "outlier_p": 0.08,
+      "dropout_p": 0.3,
+      "monitor_yaw": [
+        22.0,
+        -22.0
+      ],
+      "mount_bias": [
+        4.0,
+        -6.0
+      ],
+      "fps": 4.0
+    },
+    "simulated_hours": 10.0,
+    "label_changes": 2889,
+    "auto_switches": 1587,
+    "correct_switches": 1587,
+    "false_switches": 0,
+    "false_switches_per_hour": 0.0,
+    "missed_switches": 16,
+    "latency_ms": {
+      "n": 1572,
+      "mean": 1886.9275,
+      "p50": 1500.0,
+      "p95": 3750.0,
+      "max": 5250.0
+    },
+    "calibration_warnings": []
+  }
+]

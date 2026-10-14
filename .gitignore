@@ -1,0 +1,5 @@
+/target
+# Downloaded by scripts/fetch-model.ps1 (SHA-256 pinned)
+/models/*.task
+*.y4m
+*.tmp
