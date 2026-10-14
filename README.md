@@ -12,12 +12,7 @@ Two detectors decide which camera is live (`detector` in the config, or
 | **`mouse`** (default) | The display under the mouse cursor selects that display's camera | **Working, verified live** |
 | `face` | Head orientation from MediaPipe face landmarks, per-camera calibration | Built and unit-tested; live verification pending (MediaPipe runtime blocked on the dev network) |
 
-```
- webcam L ─┐                         ┌── GetSourceScreenshot (camera health / face frames, in memory)
- webcam R ─┤  OBS (owns both cams) ──┤
-           │  scenes LeftCam/RightCam └── SetCurrentProgramScene ◄── AutoCam ◄── mouse cursor display
-           └─► Program ─► Virtual Camera ─► Teams                          └── (or) head pose
-```
+New to OBS or AutoCam? Start with [How it works](#how-it-works).
 
 - OBS owns both webcams. AutoCam never opens a camera device.
 - **Mouse mode:** each camera owns one or more displays. A display that belongs
@@ -32,6 +27,131 @@ Two detectors decide which camera is live (`detector` in the config, or
   status/control endpoint.
 - Frames are never saved, sent or logged. Network endpoints are loopback only,
   and OBS WebSocket uses authentication.
+
+## How it works
+
+OBS does all the video work. AutoCam does no video work at all: it only
+decides which camera should be live and tells OBS. Think of OBS as a TV
+studio's vision mixer, and AutoCam as the director calling "cut to camera 2".
+
+```
+ Dell webcam ───┐
+                ├──►  OBS  ──►  OBS Virtual Camera  ──►  Teams
+ Laptop camera ─┘      ▲        (looks like a webcam)
+                       │
+                       │  "show LeftCam" / "show RightCam"
+                       │
+                    AutoCam  ◄── where is your mouse?
+```
+
+### OBS: the video mixer
+
+- **Owns both webcams.** OBS is the only program that opens them. That's why
+  Teams must never select a physical webcam: two apps fighting over one camera
+  is a common cause of black or frozen video.
+- **Holds two scenes.** **LeftCam** shows the left webcam full-screen and
+  **RightCam** shows the right one. A scene is a ready-made picture layout.
+- **Has one Program output,** the scene currently "on air". Switching cameras
+  just means changing which scene is on Program, and OBS does that instantly
+  (or with a short fade).
+- **Sends Program to Teams.** The **Virtual Camera** makes OBS's output appear
+  to Windows as a webcam called "OBS Virtual Camera". Teams treats it like any
+  camera and has no idea there are two real ones behind it.
+- **Can be remote-controlled.** OBS's built-in **WebSocket server** (port 4455,
+  password-protected) lets another program on your PC ask it to do things.
+  That's how AutoCam talks to it.
+
+Without AutoCam, OBS works fine: you'd click LeftCam or RightCam yourself
+whenever you wanted to switch.
+
+### AutoCam: the automatic director
+
+AutoCam replaces your clicking. It runs a small loop:
+
+1. **Every 100 ms, it checks where the mouse is** and which display that is.
+2. **It looks up which camera that display belongs to,** for example left
+   monitor → LeftCam, laptop screen → RightCam, another monitor → no change.
+3. **It waits until it's sure.** The mouse must stay 300 ms on the other
+   camera's display, and switches are at least 1.5 s apart, so moving the
+   mouse across a screen doesn't make the picture flicker.
+4. **It tells OBS to switch** by sending "set Program to RightCam" over the
+   WebSocket.
+5. **Once a second it checks both cameras' health.** It asks OBS for a small
+   snapshot of each camera, held only in memory and never saved. If a camera
+   is black or frozen, AutoCam refuses to switch to it.
+
+It also handles the extras:
+
+- **Manual override:** Ctrl+Alt+Left / Ctrl+Alt+Right to choose a camera
+  yourself, Ctrl+Alt+A to resume automatic switching.
+- **Reconnecting** if OBS restarts.
+- **A status page** at `http://127.0.0.1:8787/status` that only your own PC can
+  reach.
+
+### Who does what
+
+| Task | OBS | AutoCam |
+|---|---|---|
+| Opens the webcams | ✓ | never |
+| Produces the video Teams sees | ✓ | |
+| Holds the LeftCam / RightCam scenes | ✓ | (creates them once via `obs-setup`) |
+| Decides *which* camera should be live | | ✓ (mouse position, or head direction) |
+| Performs the switch | ✓ | asks OBS to |
+| Watches for broken cameras | | ✓ |
+
+That's why the start order matters:
+
+1. **OBS first,** because it owns the cameras and the output.
+2. **Then Start Virtual Camera,** so Teams has something to show.
+3. **Then AutoCam,** so the picture follows your mouse.
+
+If AutoCam stops, Teams keeps working: the picture just stops switching
+automatically. If OBS stops, Teams loses the picture.
+
+### Face mode: who evaluates which camera you are facing?
+
+**AutoCam does, on your own PC**, using Google's open-source MediaPipe face
+model running inside the AutoCam process. OBS doesn't evaluate anything; it
+only supplies the pictures. No cloud service is involved. Face mode changes
+only step 1 of the loop: instead of "where's the mouse?" it asks "which camera
+are you facing?". Everything after that is the same.
+
+1. **Snapshots from OBS.** Four times a second, AutoCam asks OBS for a small
+   snapshot (480×270) from **each** camera. The snapshots stay in memory and
+   are discarded right after analysis. They are never saved, sent anywhere or
+   logged.
+2. **Face landmarks (MediaPipe).** Each snapshot goes through MediaPipe's *Face
+   Landmarker*, a small pretrained model (`face_landmarker.task`, 3.7 MB) that
+   runs locally on the CPU. It finds your face and places 478 points on it:
+   eye corners, nose tip, chin and so on.
+3. **Head direction.** From those points, AutoCam works out which way your head
+   is turned (left/right and up/down) **as seen from that camera**. If you face
+   the left camera straight on, it sees a frontal face while the right camera
+   sees you turned away.
+4. **Calibration.** Cameras are rarely mounted perfectly. A one-time
+   `autocam calibrate` has you look at each monitor for a few seconds, so
+   AutoCam learns what "facing this monitor" looks like from each camera,
+   including its mounting angle.
+5. **Scores and decision.** Each camera gets a 0–1 score for how closely what it
+   sees matches its "facing me" pose. AutoCam switches only when one camera
+   clearly wins (by a margin) and keeps winning for 0.8 s. It holds the current
+   camera when:
+   - you look down at the keyboard,
+   - no face is found,
+   - both scores are close, for example when you look at the gap between the
+     monitors.
+6. **The switch.** As in mouse mode, AutoCam then tells OBS "show LeftCam" or
+   "show RightCam".
+
+So the chain is: **OBS** provides the pictures → **MediaPipe, inside AutoCam**
+finds your face → **AutoCam** turns that into "which camera you're facing" and
+decides → **OBS** switches.
+
+Face mode measures where your **head** points, not your eyes. Glancing at the
+other monitor without turning your head won't switch, which is intentional.
+
+For the technical design (pipelines, scoring formulas, state machine), see
+[docs/DESIGN.md](docs/DESIGN.md).
 
 ## Status
 
@@ -83,14 +203,74 @@ The mouse detector needs nothing else. For the face detector only:
 The binary is `target\release\autocam.exe`. The default config file is
 `%APPDATA%\AutoCam\config.toml`.
 
-## Quick start (mouse mode)
+## Run it (mouse mode)
 
-```powershell
-autocam obs-setup --left-device "Dell Webcam" --right-device "Integrated Camera"
-autocam map-monitors        # put the mouse on each camera's display, press Enter
-autocam watch               # optional: shows display -> camera as you move the mouse
-autocam run
-```
+All commands run from the repo root in a normal PowerShell window. AutoCam is
+`.\target\release\autocam.exe` after `cargo build --release`.
+
+### One-time setup
+
+1. **Enable OBS WebSocket.** With **OBS closed**, run:
+   ```powershell
+   .\scripts\enable-obs-websocket.ps1
+   ```
+   This turns on OBS's WebSocket server with a random password and saves the
+   password for AutoCam (it is never printed).
+2. **Start OBS** from the Start menu. Cancel the first-run wizard if it appears.
+3. **Create the camera scenes.** Use part of each webcam's name as OBS lists it
+   (OBS → Add Source → Video Capture Device shows the names):
+   ```powershell
+   .\target\release\autocam.exe obs-setup --left-device "Dell" --right-device "Integrated"
+   ```
+   OBS now has scenes **LeftCam** and **RightCam**, one camera each.
+4. **Map your displays to cameras:**
+   ```powershell
+   .\target\release\autocam.exe map-monitors
+   ```
+   Put the mouse on the display that should select the left camera and press
+   Enter, then the same for the right camera. Any other display can select a
+   camera or keep the current one. Check the result with
+   `.\target\release\autocam.exe monitors`.
+
+### Every time
+
+Start things in this order:
+
+1. **OBS:** start it from the Start menu and leave it running. It owns both
+   webcams, and Teams reads its output.
+2. **Virtual camera:** in OBS, click **Start Virtual Camera** (Controls dock,
+   bottom right).
+3. **AutoCam:** in a PowerShell window, run:
+   ```powershell
+   .\target\release\autocam.exe run
+   ```
+   Leave the window open. It logs a line on every switch. Press `q` (or
+   Ctrl+C) to stop.
+4. **Teams:** open Teams, go to **Settings → Devices → Camera**, and choose **OBS
+   Virtual Camera**. Do this once; Teams remembers it. Never pick a physical
+   webcam in Teams, because OBS must be the only app using the cameras.
+
+### Test it
+
+- **Camera preview:** with Teams' **Settings → Devices** open, move the mouse
+  to the other camera's display. The preview switches within about half a
+  second. On a display mapped to neither camera, nothing changes.
+- **Meeting:** in Teams, open **Calendar → Meet now → Start meeting** with
+  the camera on. To see what others see, join the same meeting from your phone.
+  Your own self-view is mirrored; others see you the right way round.
+- **Manual override:** **Ctrl+Alt+Left** / **Ctrl+Alt+Right** picks a camera and
+  pauses automatic switching. **Ctrl+Alt+A** resumes it.
+
+If something is off:
+
+| Symptom | Fix |
+|---|---|
+| Teams shows black or a frozen OBS image | Start the Virtual Camera *before* opening Teams, or restart Teams |
+| AutoCam logs `camera unavailable (…); will not switch to it` | That webcam is black or frozen. Run `autocam reactivate`; if it stays frozen, restart OBS |
+| `N displays connected and no monitor mapping configured` | Run `autocam map-monitors` |
+| `connecting to OBS … failed` | OBS isn't running, or step 1 of the one-time setup was skipped |
+
+More detail is in [docs/SETUP.md](docs/SETUP.md).
 
 ## Usage
 
