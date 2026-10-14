@@ -12,7 +12,18 @@
 
 ## 2. Enable OBS WebSocket (with authentication)
 
-OBS → **Tools → WebSocket Server Settings**:
+**Scripted (recommended):** close OBS, then from the repo root run
+
+```powershell
+.\scripts\enable-obs-websocket.ps1
+```
+
+It enables the server on port 4455 with authentication, generates a random
+password (or reuses an existing one), and stores it in
+`%APPDATA%\AutoCam\config.toml` without printing it. It also skips OBS's
+first-run wizard. Then start OBS and continue with step 3.
+
+**By hand:** OBS → **Tools → WebSocket Server Settings**:
 
 1. Tick **Enable WebSocket server**, keep port **4455**.
 2. Tick **Enable Authentication** and set a long random password (or click *Generate*).
