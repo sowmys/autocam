@@ -222,7 +222,12 @@ All commands run from the repo root in a normal PowerShell window. AutoCam is
    ```powershell
    .\target\release\autocam.exe obs-setup --left-device "Dell" --right-device "Integrated"
    ```
-   OBS now has scenes **LeftCam** and **RightCam**, one camera each.
+   OBS now has scenes **LeftCam** and **RightCam**, one camera each. The
+   command also sets OBS's picture size (canvas and output) to **1920×1080 at
+   30 fps**, sets each webcam to 1920×1080 (or the closest widescreen size it
+   supports), and makes each camera fill the frame. Add `--resolution 1280x720`
+   for a lighter load. It's safe to re-run at any time. If the Virtual
+   Camera is on, it is briefly stopped and restarted.
 4. **Map your displays to cameras:**
    ```powershell
    .\target\release\autocam.exe map-monitors
@@ -266,6 +271,7 @@ If something is off:
 | Symptom | Fix |
 |---|---|
 | Teams shows black or a frozen OBS image | Start the Virtual Camera *before* opening Teams, or restart Teams |
+| Your image fills only part of the Teams picture, or looks blurry | Re-run step 3 (`obs-setup`). It sets OBS to 1920×1080 and fits the cameras to the frame |
 | AutoCam logs `camera unavailable (…); will not switch to it` | That webcam is black or frozen. Run `autocam reactivate`; if it stays frozen, restart OBS |
 | `N displays connected and no monitor mapping configured` | Run `autocam map-monitors` |
 | `connecting to OBS … failed` | OBS isn't running, or step 1 of the one-time setup was skipped |
@@ -276,7 +282,7 @@ More detail is in [docs/SETUP.md](docs/SETUP.md).
 
 | Command | Purpose |
 |---|---|
-| `autocam obs-setup --left-device "<name>" --right-device "<name>"` | Create LeftCam/RightCam scenes, camera inputs and keepalive items in OBS |
+| `autocam obs-setup --left-device "<name>" --right-device "<name>" [--resolution 1920x1080]` | Create LeftCam/RightCam scenes and camera inputs in OBS; set the canvas and camera resolution; fit the cameras to the frame; add keepalive items |
 | `autocam monitors` | List displays, the mouse mapping, and the display under the cursor |
 | `autocam map-monitors [--left DISPLAY2] [--right DISPLAY1,DISPLAY3]` | Choose which displays select which camera (interactive without flags) |
 | `autocam watch` | Mouse: live display → camera. Face: live yaw/pitch/score per camera |

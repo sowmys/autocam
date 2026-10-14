@@ -66,9 +66,25 @@ Device), then:
 
 ```powershell
 autocam obs-setup --left-device "Logitech BRIO" --right-device "Integrated Camera"
+# optional: --resolution 1280x720   (default 1920x1080)
 ```
 
-This creates:
+It sets:
+
+- **OBS canvas and output:** `--resolution` (default 1920×1080) at 30 fps. This
+  is the picture Teams receives. A fresh OBS profile whose first-run wizard
+  was skipped runs at 640×480. If the Virtual Camera is on, it is stopped and
+  restarted around this change, because OBS refuses it while an output is
+  active.
+- **Camera resolution:** AutoCam asks each webcam which modes it supports and
+  picks `--resolution` if available, else the largest widescreen (16:9) mode
+  that fits, else the largest mode that fits. Device defaults are often as low
+  as 640×360.
+- **Fit to frame:** each camera is scaled to fill its scene (aspect ratio kept,
+  centred), like OBS's *Transform → Fit to screen*. Without this, a camera
+  smaller than the canvas sits in the top-left corner.
+
+The command is safe to re-run. It also creates:
 
 | Scene | Contains |
 |---|---|
@@ -88,14 +104,18 @@ re-run `autocam spike` to confirm both cameras stay fresh.
 
 Manual equivalent:
 
-1. Create scenes `LeftCam` and `RightCam`.
-2. In `LeftCam`, add a Video Capture Device `AutoCam Left` (left camera).
-   Properties: resolution 1280x720 or 1920x1080, untick **Deactivate when not showing**.
-3. In `RightCam`, add `AutoCam Right` (right camera), same settings.
-4. In `LeftCam`, *Add Existing* `AutoCam Right`. Transform → Edit Transform:
+1. OBS → Settings → **Video**: Base (Canvas) and Output (Scaled) Resolution
+   **1920x1080**, Common FPS **30**.
+2. Create scenes `LeftCam` and `RightCam`.
+3. In `LeftCam`, add a Video Capture Device `AutoCam Left` (left camera).
+   Properties: Resolution/FPS Type **Custom**, resolution 1920x1080 (or
+   1280x720), untick **Deactivate when not showing**. Then right-click it →
+   Transform → **Fit to screen**.
+4. In `RightCam`, add `AutoCam Right` (right camera), same settings.
+5. In `LeftCam`, *Add Existing* `AutoCam Right`. Transform → Edit Transform:
    position (-20000, -20000), size 1%. Lock it.
-5. In `RightCam`, do the same with `AutoCam Left`.
-6. Optional: Scene Transitions → **Cut** for instant switches, or **Fade 150–300 ms**
+6. In `RightCam`, do the same with `AutoCam Left`.
+7. Optional: Scene Transitions → **Cut** for instant switches, or **Fade 150–300 ms**
    for softer ones.
 
 Names can differ. Set them in `config.toml` under `[cameras.left]` / `[cameras.right]`
@@ -177,6 +197,8 @@ Notes:
 | `N displays connected and no monitor mapping configured` | Run `autocam map-monitors` |
 | Mouse on a display does nothing | That display is unmapped (keeps the current camera) or its number changed: run `autocam monitors` |
 | Status shows `black` for a camera | Device not delivering video: privacy shutter, camera F-key, another app holding it. Then run `autocam reactivate` |
+| Your image fills only part of the Teams picture (e.g. the top-left quarter), or looks blurry | OBS canvas is small (640×480 on a fresh profile) or cameras are at a low default resolution. Re-run `autocam obs-setup …`; it sets 1920×1080 and fits the cameras to the frame |
+| `changing the OBS canvas` error from `obs-setup` | OBS is recording or streaming; stop that and re-run |
 | Camera shows a grey "camera off" image | Laptop privacy shutter or camera kill switch (e.g. Lenovo F8/F9). Open or toggle it |
 | `MediaPipe face tracking unavailable` | Run `scripts\fetch-mediapipe.ps1`, or set `MEDIAPIPE_LIB` |
 | Hotkey not registered | Another app (e.g. Intel graphics screen rotation) owns Ctrl+Alt+Arrow; use the console or HTTP instead |
