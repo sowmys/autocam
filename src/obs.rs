@@ -179,6 +179,7 @@ impl Obs {
         cfg: &mut Config,
         left_device: &str,
         right_device: Option<&str>,
+        resolution: (u32, u32),
     ) -> Result<()> {
         let scenes = self.scene_names().await?;
         let inputs = self.input_names().await?;
@@ -263,8 +264,170 @@ impl Obs {
             self.configure_camera(&right.source, &rid).await?;
             info!("`{}` -> {rname}", right.source);
         }
+        let mut inputs_done: Vec<String> = Vec::new();
+        for cam in CamId::ALL {
+            let source = cfg.camera(cam).source.clone();
+            if inputs_done.contains(&source) {
+                continue;
+            }
+            match self.set_camera_resolution(&source, resolution).await {
+                Ok(r) => info!("`{source}` resolution {r}"),
+                Err(e) => {
+                    warn!("could not set `{source}` resolution ({e:#}); keeping device default")
+                }
+            }
+            inputs_done.push(source);
+        }
+        self.set_canvas(resolution.0, resolution.1).await?;
+        // Let OBS re-open the cameras at the new resolution before fitting.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        self.fit_cameras_to_canvas(cfg).await?;
         for a in self.ensure_keepalive(cfg).await? {
             info!("keepalive: added {a} (tiny, off-canvas, locked)");
+        }
+        Ok(())
+    }
+
+    /// Sets OBS's canvas and output resolution (30 fps). OBS refuses this
+    /// while an output is active, so the Virtual Camera is stopped and
+    /// restarted around the change (a one-second blip in Teams).
+    pub async fn set_canvas(&self, width: u32, height: u32) -> Result<()> {
+        use obws::requests::config::SetVideoSettings;
+        let v = self.client.config().video_settings().await?;
+        if (v.base_width, v.base_height, v.output_width, v.output_height)
+            == (width, height, width, height)
+        {
+            info!("OBS canvas already {width}x{height}");
+            return Ok(());
+        }
+        let vcam_on = self.client.virtual_cam().status().await.unwrap_or(false);
+        if vcam_on {
+            info!("stopping the Virtual Camera to change the canvas");
+            self.client.virtual_cam().stop().await?;
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+        }
+        let result = self
+            .client
+            .config()
+            .set_video_settings(SetVideoSettings {
+                base_width: Some(width),
+                base_height: Some(height),
+                output_width: Some(width),
+                output_height: Some(height),
+                fps_numerator: Some(30),
+                fps_denominator: Some(1),
+            })
+            .await;
+        if vcam_on {
+            self.client.virtual_cam().start().await?;
+            info!("Virtual Camera restarted");
+        }
+        result.context(
+            "changing the OBS canvas (stop any recording or streaming in OBS and try again)",
+        )?;
+        info!(
+            "OBS canvas {}x{} -> {width}x{height} @ 30 fps",
+            v.base_width, v.base_height
+        );
+        Ok(())
+    }
+
+    /// Asks a camera which resolutions it supports and selects `want`
+    /// (e.g. 1920x1080) or, failing that, the largest 16:9 mode not above it,
+    /// then the largest mode not above it. Returns the chosen resolution.
+    pub async fn set_camera_resolution(&self, input: &str, want: (u32, u32)) -> Result<String> {
+        // Custom resolution mode makes OBS populate the device's mode list.
+        self.client
+            .inputs()
+            .set_settings(SetSettings {
+                input: InputId::Name(input),
+                settings: &json!({ "res_type": 1 }),
+                overlay: Some(true),
+            })
+            .await?;
+        let items = self
+            .client
+            .inputs()
+            .properties_list_property_items(InputId::Name(input), "resolution")
+            .await
+            .with_context(|| format!("listing resolutions of `{input}`"))?;
+        let modes: Vec<(u32, u32)> = items
+            .iter()
+            .filter_map(|i| i.value.as_str().and_then(parse_resolution))
+            .collect();
+        let chosen = pick_resolution(&modes, want)
+            .with_context(|| format!("`{input}` reported no resolutions"))?;
+        let res = format!("{}x{}", chosen.0, chosen.1);
+        self.client
+            .inputs()
+            .set_settings(SetSettings {
+                input: InputId::Name(input),
+                settings: &json!({ "res_type": 1, "resolution": res }),
+                overlay: Some(true),
+            })
+            .await?;
+        Ok(res)
+    }
+
+    /// Makes each camera fill its own scene, like OBS's "Fit to screen":
+    /// scaled to the canvas with the aspect ratio kept, centred. Without this
+    /// a 1080p camera on a 4K canvas covers only the top-left quarter.
+    pub async fn fit_cameras_to_canvas(&self, cfg: &Config) -> Result<()> {
+        use obws::common::{Alignment, BoundsType};
+        use obws::requests::scene_items::{Bounds, Position, SceneItemTransform, SetTransform};
+
+        let video = self.client.config().video_settings().await?;
+        let (w, h) = (video.base_width as f32, video.base_height as f32);
+        info!(
+            "OBS canvas {}x{}, output {}x{} @ {}/{} fps",
+            video.base_width,
+            video.base_height,
+            video.output_width,
+            video.output_height,
+            video.fps_numerator,
+            video.fps_denominator
+        );
+        for cam in CamId::ALL {
+            let c = cfg.camera(cam);
+            let items = self
+                .client
+                .scene_items()
+                .list(c.scene.as_str().into())
+                .await?;
+            let Some(item) = items.iter().find(|i| i.source_name == c.source) else {
+                warn!(
+                    "`{}` is not in scene `{}`; cannot fit it",
+                    c.source, c.scene
+                );
+                continue;
+            };
+            self.client
+                .scene_items()
+                .set_transform(SetTransform {
+                    scene: c.scene.as_str().into(),
+                    item_id: item.id,
+                    transform: SceneItemTransform {
+                        position: Some(Position {
+                            x: Some(0.0),
+                            y: Some(0.0),
+                        }),
+                        rotation: Some(0.0),
+                        alignment: Some(Alignment::LEFT | Alignment::TOP),
+                        bounds: Some(Bounds {
+                            r#type: Some(BoundsType::ScaleInner),
+                            alignment: Some(Alignment::CENTER),
+                            width: Some(w),
+                            height: Some(h),
+                        }),
+                        ..Default::default()
+                    },
+                })
+                .await
+                .with_context(|| format!("fitting `{}` in `{}`", c.source, c.scene))?;
+            info!(
+                "`{}` fitted to the {w}x{h} canvas in `{}`",
+                c.source, c.scene
+            );
         }
         Ok(())
     }
@@ -480,6 +643,30 @@ impl Obs {
     }
 }
 
+pub fn parse_resolution(s: &str) -> Option<(u32, u32)> {
+    let (w, h) = s.trim().split_once(['x', 'X'])?;
+    Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
+}
+
+/// Exact match; else the largest 16:9 mode within `want`; else the largest
+/// mode within `want`; else the smallest mode overall.
+pub fn pick_resolution(modes: &[(u32, u32)], want: (u32, u32)) -> Option<(u32, u32)> {
+    if modes.contains(&want) {
+        return Some(want);
+    }
+    let area = |m: &(u32, u32)| u64::from(m.0) * u64::from(m.1);
+    let fits = |m: &&(u32, u32)| m.0 <= want.0 && m.1 <= want.1;
+    let wide = |m: &&(u32, u32)| u64::from(m.0) * 9 == u64::from(m.1) * 16;
+    modes
+        .iter()
+        .filter(fits)
+        .filter(wide)
+        .max_by_key(|m| area(m))
+        .or_else(|| modes.iter().filter(fits).max_by_key(|m| area(m)))
+        .or_else(|| modes.iter().min_by_key(|m| area(m)))
+        .copied()
+}
+
 /// Connects, retrying with capped exponential backoff until it succeeds or
 /// `shutdown` flips to true. Each failure is logged once per attempt.
 pub async fn connect_with_backoff(
@@ -511,5 +698,35 @@ pub async fn connect_with_backoff(
             _ = shutdown.changed() => return None,
         }
         delay = (delay * 2).min(max);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_resolutions() {
+        assert_eq!(parse_resolution("1920x1080"), Some((1920, 1080)));
+        assert_eq!(parse_resolution(" 640 x 480 "), Some((640, 480)));
+        assert_eq!(parse_resolution("bogus"), None);
+    }
+
+    #[test]
+    fn picks_exact_then_widescreen_then_largest() {
+        let dell = [(640, 480), (1280, 720), (1920, 1080), (3840, 2160)];
+        assert_eq!(pick_resolution(&dell, (1920, 1080)), Some((1920, 1080)));
+        // No exact match: best 16:9 that fits, even if a 4:3 mode is larger.
+        let cam = [(640, 360), (1280, 720), (1600, 1200), (2592, 1944)];
+        assert_eq!(pick_resolution(&cam, (1920, 1080)), Some((1280, 720)));
+        // No 16:9 that fits: largest that fits.
+        let old = [(320, 240), (640, 480), (2048, 1536)];
+        assert_eq!(pick_resolution(&old, (1920, 1080)), Some((640, 480)));
+        // Nothing fits: smallest available.
+        assert_eq!(
+            pick_resolution(&[(3840, 2160)], (1280, 720)),
+            Some((3840, 2160))
+        );
+        assert_eq!(pick_resolution(&[], (1920, 1080)), None);
     }
 }

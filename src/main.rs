@@ -81,6 +81,9 @@ enum Cmd {
         /// second camera by re-using the left one.
         #[arg(long)]
         right_device: Option<String>,
+        /// OBS canvas/output size and preferred camera resolution.
+        #[arg(long, default_value = "1920x1080")]
+        resolution: String,
     },
     /// Simulate the decision stack on synthetic head-pose signals.
     Simulate {
@@ -204,9 +207,12 @@ async fn main() -> Result<()> {
         Cmd::ObsSetup {
             left_device,
             right_device,
+            resolution,
         } => {
+            let res = obs::parse_resolution(&resolution)
+                .with_context(|| format!("--resolution `{resolution}` is not WIDTHxHEIGHT"))?;
             let o = obs::Obs::connect(&cfg.obs).await?;
-            o.setup_scenes(&mut cfg, &left_device, right_device.as_deref())
+            o.setup_scenes(&mut cfg, &left_device, right_device.as_deref(), res)
                 .await?;
             let mut on_disk = Config::load(&config_path)?;
             on_disk.cameras = cfg.cameras.clone();
