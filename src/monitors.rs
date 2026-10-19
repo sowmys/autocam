@@ -7,48 +7,45 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 
+use crate::Cams;
 use crate::config::{Config, DetectorKind};
 use crate::mouse::{self, CursorTarget, Display, MonitorMap};
-use crate::{CamId, PerCam};
 
 fn short(device: &str) -> &str {
     device.trim_start_matches(r"\\.\")
 }
 
-fn print_displays(displays: &[Display], map: Option<&MonitorMap>) {
+fn print_displays(cfg: &Config, displays: &[Display], map: Option<&MonitorMap>) {
     for d in displays {
-        let role = match map.and_then(|m| m.cam_for(&d.device)) {
-            Some(CamId::Left) => "-> left camera",
-            Some(CamId::Right) => "-> right camera",
-            None if map.is_some() => "-> keep current camera",
-            None => "",
+        let role = match map.map(|m| m.cam_for(&d.device)) {
+            Some(Some(c)) => format!("-> camera {} `{}`", c.number(), cfg.cam_name(c)),
+            Some(None) => "-> keep current camera".into(),
+            None => String::new(),
         };
-        println!("  {:<10} {role}  {}", short(&d.device), d.describe());
+        println!("  {:<10} {role:<26} {}", short(&d.device), d.describe());
+    }
+}
+
+fn empty_map(cfg: &Config) -> MonitorMap {
+    MonitorMap {
+        by_cam: vec![Vec::new(); cfg.cameras.len()],
     }
 }
 
 /// `autocam monitors`
 pub fn list(cfg: &Config) -> Result<()> {
     let displays = mouse::displays()?;
-    let map = MonitorMap::resolve(&cfg.mouse, &displays);
+    let map = MonitorMap::resolve(&cfg.cameras, &displays);
     println!("detector: {:?}", cfg.detector);
     println!("displays (physical pixels):");
-    print_displays(&displays, map.as_ref().ok());
-    match &map {
-        Ok(_) => {}
-        Err(e) => println!("mapping: {e:#}"),
+    print_displays(cfg, &displays, map.as_ref().ok());
+    if let Err(e) = &map {
+        println!("mapping: {e:#}");
     }
-    for m in MonitorMap::missing(&cfg.mouse, &displays) {
-        println!("warning: configured display `{m}` is not connected");
+    for (cam, m) in MonitorMap::missing(&cfg.cameras, &displays) {
+        println!("warning: camera `{cam}`: configured display `{m}` is not connected");
     }
-    let (_, under) = mouse::target(
-        mouse::cursor_pos(),
-        &displays,
-        &MonitorMap {
-            left: vec![],
-            right: vec![],
-        },
-    );
+    let (_, under) = mouse::target(mouse::cursor_pos(), &displays, &empty_map(cfg));
     println!(
         "cursor is on: {}",
         under.as_deref().map_or("unknown", short)
@@ -67,14 +64,10 @@ async fn read_line(prompt: &str) -> Result<String> {
     Ok(line.trim().to_owned())
 }
 
-async fn display_under_cursor(prompt: &str, displays: &[Display]) -> Result<String> {
+async fn display_under_cursor(cfg: &Config, prompt: &str, displays: &[Display]) -> Result<String> {
     loop {
         read_line(prompt).await?;
-        let empty = MonitorMap {
-            left: vec![],
-            right: vec![],
-        };
-        match mouse::target(mouse::cursor_pos(), displays, &empty).1 {
+        match mouse::target(mouse::cursor_pos(), displays, &empty_map(cfg)).1 {
             Some(d) => {
                 println!("  -> {}", short(&d));
                 return Ok(short(&d).to_owned());
@@ -91,73 +84,93 @@ fn split(list: &str) -> Vec<String> {
         .collect()
 }
 
-/// `autocam map-monitors [--left A,B] [--right C]`
-pub async fn map(config_path: &Path, left: Option<&str>, right: Option<&str>) -> Result<()> {
+/// `autocam map-monitors [--assign NAME=DISPLAY[,DISPLAY]]...`
+///
+/// With assignments, every camera's displays are replaced by them (cameras
+/// not named get none). Without, it asks interactively.
+pub async fn map(config_path: &Path, assignments: &[(String, String)]) -> Result<()> {
+    let mut cfg = Config::load(config_path)?;
     let displays = mouse::displays()?;
     println!("displays:");
-    print_displays(&displays, None);
+    print_displays(&cfg, &displays, None);
 
-    let (left, right) = if left.is_some() || right.is_some() {
-        (
-            split(left.unwrap_or_default()),
-            split(right.unwrap_or_default()),
-        )
-    } else {
+    let mut by_cam: Vec<Vec<String>> = vec![Vec::new(); cfg.cameras.len()];
+    if assignments.is_empty() {
         println!(
             "\nFor each prompt, move the mouse onto the display, then press Enter (the window does not need focus for the mouse)."
         );
-        let l = display_under_cursor(
-            "\nDisplay that selects the LEFT camera: put the mouse there, press Enter... ",
-            &displays,
-        )
-        .await?;
-        let r = loop {
-            let r = display_under_cursor(
-                "Display that selects the RIGHT camera: put the mouse there, press Enter... ",
-                &displays,
-            )
-            .await?;
-            if r != l {
-                break r;
-            }
-            println!("  that display is already the left camera's; pick another");
-        };
-        let mut left = vec![l];
-        let mut right = vec![r];
+        for cam in cfg.cam_ids() {
+            let d = loop {
+                let d = display_under_cursor(
+                    &cfg,
+                    &format!(
+                        "\nDisplay that selects camera {} `{}`: put the mouse there, press Enter... ",
+                        cam.number(),
+                        cfg.cam_name(cam)
+                    ),
+                    &displays,
+                )
+                .await?;
+                if !by_cam.iter().flatten().any(|x| *x == d) {
+                    break d;
+                }
+                println!("  that display is already assigned; pick another");
+            };
+            by_cam[cam.0].push(d);
+        }
+        let choices: Vec<String> = cfg
+            .cameras
+            .iter()
+            .enumerate()
+            .map(|(i, c)| format!("[{}] {}", i + 1, c.name))
+            .collect();
         for d in &displays {
             let name = short(&d.device).to_owned();
-            if left.contains(&name) || right.contains(&name) {
+            if by_cam.iter().flatten().any(|x| *x == name) {
                 continue;
             }
             let answer = read_line(&format!(
-                "Cursor on {} selects: [l]eft camera, [r]ight camera, or [k]eep the current camera? [k] ",
-                d.describe()
+                "Cursor on {} selects: {} or [k]eep the current camera? [k] ",
+                d.describe(),
+                choices.join(", ")
             ))
             .await?;
-            match answer.to_ascii_lowercase().as_str() {
-                "l" | "left" => left.push(name),
-                "r" | "right" => right.push(name),
-                _ => {}
+            if let Some(cam) = cfg.find_camera(&answer) {
+                by_cam[cam.0].push(name);
             }
         }
-        (left, right)
-    };
-
-    let mut cfg = Config::load(config_path)?;
-    cfg.mouse.left_monitors = left;
-    cfg.mouse.right_monitors = right;
-    let map = MonitorMap::resolve(&cfg.mouse, &displays)?;
-    let missing = MonitorMap::missing(&cfg.mouse, &displays);
-    if !missing.is_empty() {
-        bail!("not connected: {}", missing.join(", "));
+    } else {
+        for (key, list) in assignments {
+            let Some(cam) = cfg.find_camera(key) else {
+                let names: Vec<&str> = cfg.cameras.iter().map(|c| c.name.as_str()).collect();
+                bail!("no camera `{key}`; cameras are {}", names.join(", "));
+            };
+            by_cam[cam.0].extend(split(list));
+        }
     }
-    if map.left.is_empty() || map.right.is_empty() {
-        bail!("each camera needs at least one display");
+
+    for (c, mons) in cfg.cameras.iter_mut().zip(by_cam) {
+        c.monitors = mons;
+    }
+    cfg.validate()?;
+    let missing = MonitorMap::missing(&cfg.cameras, &displays);
+    if !missing.is_empty() {
+        let list: Vec<String> = missing.iter().map(|(c, d)| format!("{d} ({c})")).collect();
+        bail!("not connected: {}", list.join(", "));
+    }
+    let map = MonitorMap::resolve(&cfg.cameras, &displays)?;
+    for (c, devs) in cfg.cameras.iter().zip(&map.by_cam) {
+        if devs.is_empty() {
+            println!(
+                "note: camera `{}` has no display; only manual selection reaches it",
+                c.name
+            );
+        }
     }
     cfg.detector = DetectorKind::Mouse;
     cfg.save(config_path)?;
     println!("\nmapping:");
-    print_displays(&displays, Some(&map));
+    print_displays(&cfg, &displays, Some(&map));
     println!("saved to {} (detector = mouse)", config_path.display());
     Ok(())
 }
@@ -166,10 +179,10 @@ pub async fn map(config_path: &Path, left: Option<&str>, right: Option<&str>) ->
 /// target and verdict. Needs no OBS.
 pub async fn watch(cfg: &Config, seconds: Option<u64>) -> Result<()> {
     let displays = mouse::displays()?;
-    let map = MonitorMap::resolve(&cfg.mouse, &displays)?;
-    print_displays(&displays, Some(&map));
+    let map = MonitorMap::resolve(&cfg.cameras, &displays)?;
+    print_displays(cfg, &displays, Some(&map));
     println!("move the mouse between displays (Ctrl+C to stop)");
-    let healthy = PerCam::new(None, None);
+    let healthy = Cams::filled(cfg.cameras.len(), None);
     let end = seconds.map(|s| Instant::now() + Duration::from_secs(s));
     let mut ticker = tokio::time::interval(cfg.mouse.poll_period());
     let t0 = Instant::now();
@@ -180,12 +193,12 @@ pub async fn watch(cfg: &Config, seconds: Option<u64>) -> Result<()> {
         let key = (target, display.clone());
         if last.as_ref() != Some(&key) {
             let what = match target {
-                CursorTarget::Camera(c) => format!("{c} camera"),
+                CursorTarget::Camera(c) => format!("camera `{}`", cfg.cam_name(c)),
                 CursorTarget::Unmapped => "keep current camera".into(),
                 CursorTarget::Unknown => "unknown (hold)".into(),
             };
             println!(
-                "{:7.2}s  {:<10} -> {what:<20} {:?}",
+                "{:7.2}s  {:<10} -> {what:<22} {:?}",
                 t0.elapsed().as_secs_f32(),
                 display.as_deref().map_or("-", short),
                 mouse::decide(target, &healthy)

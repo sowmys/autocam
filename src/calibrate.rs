@@ -1,15 +1,15 @@
-//! `autocam calibrate` (interactive) and `autocam watch` (live readout).
+//! `autocam calibrate` (interactive) and `autocam watch` (live readout), face mode.
 //!
-//! Calibration procedure:
-//! 1. Face the centre of the LEFT camera's monitor, press Enter, hold ~3 s.
-//! 2. Same for the RIGHT camera's monitor.
+//! Calibration procedure, one step per camera plus an optional last one:
+//! 1. Face the centre of camera 1's monitor, press Enter, hold ~3 s.
+//! 2. Same for camera 2's monitor, and so on for every camera.
 //! 3. Optionally look down at the keyboard, press Enter, hold ~3 s.
 //!
 //! Turn your head, not just your eyes: head orientation is what is measured.
-//! Both cameras are sampled in every phase, so each camera learns both the
-//! pose it sees when you face its monitor and the pose it sees when you face
-//! the other one. That is what absorbs camera mounting angles and normalizes
-//! the two cameras' scores onto the same scale.
+//! Every camera is sampled in every step, so each camera learns the pose it
+//! sees when you face its monitor and the poses it sees when you face the
+//! others. That is what absorbs camera mounting angles and normalizes all
+//! cameras' scores onto the same scale.
 
 use std::io::Write as _;
 use std::path::Path;
@@ -17,11 +17,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 
+use crate::Cams;
 use crate::app::Pipeline;
 use crate::config::Config;
 use crate::obs::Obs;
 use crate::scoring::{Calibration, CalibrationSamples, CamSignal, PhaseSamples, fit_calibration};
-use crate::{CamId, PerCam};
 
 async fn wait_enter(prompt: &str) -> Result<()> {
     print!("{prompt}");
@@ -41,7 +41,7 @@ async fn collect(
     seconds: f32,
 ) -> Result<PhaseSamples> {
     let cal = Calibration::default();
-    let mut out = PhaseSamples::default();
+    let mut out = PhaseSamples::new(cfg.cameras.len());
     let mut ticker = tokio::time::interval(cfg.capture.period());
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let end = Instant::now() + Duration::from_secs_f32(seconds);
@@ -51,20 +51,24 @@ async fn collect(
         ticker.tick().await;
         let s = pipeline.sample(obs, cfg, &cal).await;
         out.frames += 1;
-        for cam in CamId::ALL {
-            if let Some(o) = s.get(cam).observation {
+        for (cam, smp) in s.iter() {
+            if let Some(o) = smp.observation {
                 out.poses.get_mut(cam).push(o.pose);
             }
-            if let CamSignal::Fault { fault } = s.get(cam).signal {
-                println!("  {cam} camera: {fault:?}");
+            if let CamSignal::Fault { fault } = smp.signal {
+                println!("  camera `{}`: {fault:?}", cfg.cam_name(cam));
             }
         }
     }
+    let seen: Vec<String> = out
+        .poses
+        .iter()
+        .map(|(cam, p)| format!("{} {}", cfg.cam_name(cam), p.len()))
+        .collect();
     println!(
-        "  captured {} frames; face seen by left {} / right {}",
+        "  captured {} frames; face seen by {}",
         out.frames,
-        out.poses.left.len(),
-        out.poses.right.len()
+        seen.join(" / ")
     );
     Ok(out)
 }
@@ -83,37 +87,31 @@ pub async fn calibrate(
         problems.join("; ")
     );
     let mut pipeline = Pipeline::new(cfg)?;
+    let steps = cfg.cameras.len() + usize::from(look_down);
 
     println!("\nAutoCam calibration. Turn your HEAD (not just your eyes) for each step.\n");
-    wait_enter(&format!(
-        "Step 1/{}: face the centre of the LEFT monitor (camera source `{}`), then press Enter and hold still... ",
-        if look_down { 3 } else { 2 },
-        cfg.cameras.left.source
-    ))
-    .await?;
-    let look_left = collect(&obs, cfg, &mut pipeline, seconds).await?;
-
-    wait_enter(&format!(
-        "Step 2/{}: face the centre of the RIGHT monitor (camera source `{}`), then press Enter and hold still... ",
-        if look_down { 3 } else { 2 },
-        cfg.cameras.right.source
-    ))
-    .await?;
-    let look_right = collect(&obs, cfg, &mut pipeline, seconds).await?;
+    let mut phases = Vec::with_capacity(cfg.cameras.len());
+    for (i, c) in cfg.cameras.iter().enumerate() {
+        wait_enter(&format!(
+            "Step {}/{steps}: face the centre of the monitor with camera `{}`, then press Enter and hold still... ",
+            i + 1,
+            c.name
+        ))
+        .await?;
+        phases.push(collect(&obs, cfg, &mut pipeline, seconds).await?);
+    }
 
     let look_down = if look_down {
-        wait_enter("Step 3/3: look down at your keyboard, then press Enter and hold still... ")
-            .await?;
+        wait_enter(&format!(
+            "Step {steps}/{steps}: look down at your keyboard, then press Enter and hold still... "
+        ))
+        .await?;
         Some(collect(&obs, cfg, &mut pipeline, seconds).await?)
     } else {
         None
     };
 
-    let samples = CalibrationSamples {
-        look_left,
-        look_right,
-        look_down,
-    };
+    let samples = CalibrationSamples { phases, look_down };
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
@@ -121,10 +119,11 @@ pub async fn calibrate(
         .context("calibration failed")?;
 
     println!("\nCalibration result:");
-    for cam in CamId::ALL {
+    for cam in cfg.cam_ids() {
         let c = cal.camera(cam);
         println!(
-            "  {cam:>5}: target yaw {:+6.1} pitch {:+6.1} | away {} | sigma yaw {:.1} pitch {:.1} | down below {:+.1} | noise {:.1} deg",
+            "  {:>8}: target yaw {:+6.1} pitch {:+6.1} | nearest other {} | sigma yaw {:.1} pitch {:.1} | down below {:+.1} | noise {:.1} deg",
+            cfg.cam_name(cam),
             c.target.yaw,
             c.target.pitch,
             c.away.map_or("face lost".to_owned(), |a| format!(
@@ -134,16 +133,18 @@ pub async fn calibrate(
             c.sigma_yaw,
             c.sigma_pitch,
             c.down_pitch,
-            report.noise.get(cam),
+            report.noise[cam.0],
         );
     }
-    println!(
-        "  predicted scores (L, R): facing left ({:.2}, {:.2}); facing right ({:.2}, {:.2})",
-        report.predicted_look_left.0,
-        report.predicted_look_left.1,
-        report.predicted_look_right.0,
-        report.predicted_look_right.1
-    );
+    println!("  predicted scores (rows: facing that camera's monitor):");
+    for (i, row) in report.predicted.iter().enumerate() {
+        let cells: Vec<String> = row
+            .iter()
+            .enumerate()
+            .map(|(c, v)| format!("{}={v:.2}", cfg.cameras[c].name))
+            .collect();
+        println!("    {:>8}: {}", cfg.cameras[i].name, cells.join("  "));
+    }
     for w in &report.warnings {
         println!("  WARNING: {w}");
     }
@@ -160,43 +161,49 @@ pub async fn calibrate(
 pub async fn watch(cfg: &Config, seconds: Option<u64>) -> Result<()> {
     let obs = Obs::connect(&cfg.obs).await?;
     let mut pipeline = Pipeline::new(cfg)?;
-    let cal = cfg.calibration.clone().unwrap_or_default();
+    let cal = cfg
+        .calibration
+        .clone()
+        .filter(|c| c.fits(cfg.cameras.len()))
+        .unwrap_or_default();
     let mut ticker = tokio::time::interval(cfg.capture.period());
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let end = seconds.map(|s| Instant::now() + Duration::from_secs(s));
-    let params = crate::scoring::DecisionParams {
-        min_score: cfg.switching.min_score,
-        margin: cfg.switching.confidence_margin,
-    };
-    println!("time    | left: yaw pitch score  infer | right: yaw pitch score  infer | decision");
+    let header: Vec<String> = cfg
+        .cameras
+        .iter()
+        .map(|c| format!("{}: yaw pitch score infer", c.name))
+        .collect();
+    println!("time    | {} | decision", header.join(" | "));
     let t0 = Instant::now();
     while end.is_none_or(|e| Instant::now() < e) {
         ticker.tick().await;
         let s = pipeline.sample(&obs, cfg, &cal).await;
-        let fmt = |cam: CamId| {
-            let smp = s.get(cam);
-            let infer = smp
-                .inference_ms
-                .map_or("    -".into(), |m| format!("{m:4.0}ms"));
-            match (smp.observation, smp.signal) {
-                (Some(o), CamSignal::Face(sc)) => format!(
-                    "{:+6.1} {:+6.1} {:5.2} {infer}",
-                    o.pose.yaw, o.pose.pitch, sc.score
-                ),
-                (_, CamSignal::NoFace) => format!("   no face          {infer}"),
-                (_, CamSignal::Fault { fault }) => {
-                    format!("   {:<17}{infer}", format!("{fault:?}"))
-                }
-                _ => "   -".into(),
-            }
-        };
-        let signals = PerCam::new(s.left.signal, s.right.signal);
+        let cells: Vec<String> =
+            s.0.iter()
+                .map(|smp| {
+                    let infer = smp
+                        .inference_ms
+                        .map_or("    -".into(), |m| format!("{m:4.0}ms"));
+                    match (smp.observation, smp.signal) {
+                        (Some(o), CamSignal::Face(sc)) => format!(
+                            "{:+6.1} {:+6.1} {:5.2} {infer}",
+                            o.pose.yaw, o.pose.pitch, sc.score
+                        ),
+                        (_, CamSignal::NoFace) => format!("   no face          {infer}"),
+                        (_, CamSignal::Fault { fault }) => {
+                            format!("   {:<17}{infer}", format!("{fault:?}"))
+                        }
+                        _ => "   -".into(),
+                    }
+                })
+                .collect();
+        let signals = Cams(s.0.iter().map(|smp| smp.signal).collect());
         println!(
-            "{:7.2} | {} | {} | {:?}",
+            "{:7.2} | {} | {:?}",
             t0.elapsed().as_secs_f32(),
-            fmt(CamId::Left),
-            fmt(CamId::Right),
-            crate::scoring::decide(&signals, params)
+            cells.join(" | "),
+            crate::scoring::decide(&signals, cfg.switching.decision())
         );
     }
     Ok(())

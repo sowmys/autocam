@@ -1,0 +1,75 @@
+[
+  {
+    "params": {
+      "hours": 10.0,
+      "seed": 2,
+      "noise_deg": 3.0,
+      "outlier_p": 0.08,
+      "dropout_p": 0.3,
+      "monitor_yaw": [
+        44.0,
+        0.0,
+        -44.0
+      ],
+      "mount_bias": [
+        4.0,
+        -6.0,
+        2.0
+      ],
+      "fps": 4.0
+    },
+    "simulated_hours": 10.0,
+    "label_changes": 2879,
+    "auto_switches": 1687,
+    "correct_switches": 1685,
+    "false_switches": 2,
+    "false_switches_per_hour": 0.2,
+    "missed_switches": 4,
+    "latency_ms": {
+      "n": 1682,
+      "mean": 1906.956,
+      "p50": 1750.0,
+      "p95": 3500.0,
+      "max": 5250.0
+    },
+    "calibration_warnings": []
+  },
+  {
+    "params": {
+      "hours": 10.0,
+      "seed": 2,
+      "noise_deg": 5.0,
+      "outlier_p": 0.08,
+      "dropout_p": 0.3,
+      "monitor_yaw": [
+        44.0,
+        0.0,
+        -44.0
+      ],
+      "mount_bias": [
+        4.0,
+        -6.0,
+        2.0
+      ],
+      "fps": 4.0
+    },
+    "simulated_hours": 10.0,
+    "label_changes": 2879,
+    "auto_switches": 1694,
+    "correct_switches": 1689,
+    "false_switches": 5,
+    "false_switches_per_hour": 0.5,
+    "missed_switches": 10,
+    "latency_ms": {
+      "n": 1678,
+      "mean": 1889.3027,
+      "p50": 1750.0,
+      "p95": 3500.0,
+      "max": 5250.0
+    },
+    "calibration_warnings": [
+      "camera 2: head pose is noisy (7.1 deg); improve lighting or move closer",
+      "camera 3: head pose is noisy (9.7 deg); improve lighting or move closer"
+    ]
+  }
+]

@@ -1,0 +1,149 @@
+[
+  {
+    "params": {
+      "hours": 10.0,
+      "seed": 1,
+      "noise_deg": 1.5,
+      "outlier_p": 0.02,
+      "dropout_p": 0.05,
+      "monitor_yaw": [
+        44.0,
+        0.0,
+        -44.0
+      ],
+      "mount_bias": [
+        4.0,
+        -6.0,
+        2.0
+      ],
+      "fps": 4.0
+    },
+    "simulated_hours": 10.0,
+    "label_changes": 2882,
+    "auto_switches": 1704,
+    "correct_switches": 1704,
+    "false_switches": 0,
+    "false_switches_per_hour": 0.0,
+    "missed_switches": 0,
+    "latency_ms": {
+      "n": 1704,
+      "mean": 1467.1361,
+      "p50": 1250.0,
+      "p95": 2000.0,
+      "max": 3750.0
+    },
+    "calibration_warnings": []
+  },
+  {
+    "params": {
+      "hours": 10.0,
+      "seed": 1,
+      "noise_deg": 3.0,
+      "outlier_p": 0.02,
+      "dropout_p": 0.05,
+      "monitor_yaw": [
+        44.0,
+        0.0,
+        -44.0
+      ],
+      "mount_bias": [
+        4.0,
+        -6.0,
+        2.0
+      ],
+      "fps": 4.0
+    },
+    "simulated_hours": 10.0,
+    "label_changes": 2882,
+    "auto_switches": 1705,
+    "correct_switches": 1704,
+    "false_switches": 1,
+    "false_switches_per_hour": 0.1,
+    "missed_switches": 0,
+    "latency_ms": {
+      "n": 1704,
+      "mean": 1468.3098,
+      "p50": 1500.0,
+      "p95": 2000.0,
+      "max": 3750.0
+    },
+    "calibration_warnings": []
+  },
+  {
+    "params": {
+      "hours": 10.0,
+      "seed": 1,
+      "noise_deg": 5.0,
+      "outlier_p": 0.02,
+      "dropout_p": 0.05,
+      "monitor_yaw": [
+        44.0,
+        0.0,
+        -44.0
+      ],
+      "mount_bias": [
+        4.0,
+        -6.0,
+        2.0
+      ],
+      "fps": 4.0
+    },
+    "simulated_hours": 10.0,
+    "label_changes": 2882,
+    "auto_switches": 1710,
+    "correct_switches": 1706,
+    "false_switches": 4,
+    "false_switches_per_hour": 0.4,
+    "missed_switches": 0,
+    "latency_ms": {
+      "n": 1704,
+      "mean": 1480.487,
+      "p50": 1500.0,
+      "p95": 2000.0,
+      "max": 4250.0
+    },
+    "calibration_warnings": [
+      "camera 1: head pose is noisy (6.6 deg); improve lighting or move closer",
+      "camera 2: head pose is noisy (8.5 deg); improve lighting or move closer"
+    ]
+  },
+  {
+    "params": {
+      "hours": 10.0,
+      "seed": 1,
+      "noise_deg": 8.0,
+      "outlier_p": 0.02,
+      "dropout_p": 0.05,
+      "monitor_yaw": [
+        44.0,
+        0.0,
+        -44.0
+      ],
+      "mount_bias": [
+        4.0,
+        -6.0,
+        2.0
+      ],
+      "fps": 4.0
+    },
+    "simulated_hours": 10.0,
+    "label_changes": 2882,
+    "auto_switches": 1706,
+    "correct_switches": 1704,
+    "false_switches": 2,
+    "false_switches_per_hour": 0.2,
+    "missed_switches": 2,
+    "latency_ms": {
+      "n": 1700,
+      "mean": 1676.6177,
+      "p50": 1500.0,
+      "p95": 3000.0,
+      "max": 5250.0
+    },
+    "calibration_warnings": [
+      "camera 1: head pose is noisy (10.5 deg); improve lighting or move closer",
+      "camera 2: head pose is noisy (13.6 deg); improve lighting or move closer",
+      "camera 3: head pose is noisy (7.8 deg); improve lighting or move closer"
+    ]
+  }
+]

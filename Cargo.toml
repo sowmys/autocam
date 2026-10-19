@@ -3,7 +3,7 @@ name = "autocam"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-description = "Switches OBS between two webcam scenes based on which monitor you face"
+description = "Switches OBS between webcam scenes based on the monitor you use or face"
 license = "MIT"
 publish = false
 
@@ -11,6 +11,7 @@ publish = false
 anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 mediapipe = "0.1"
 obws = { version = "0.15", features = ["events"] }

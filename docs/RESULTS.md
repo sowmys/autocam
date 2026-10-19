@@ -141,9 +141,10 @@ estimates, not measurements.** Measure with acceptance test G
 Script:
 
 - A user alternates between monitors (3–30 s), looks down (0.8–8 s), glances
-  at the gap (0.3–1.2 s) and leaves (2–12 s).
-- Monitors are at ±22° head yaw. Camera mounting biases are +4° and −6°.
-- Head turns take 350 ms.
+  at a gap between adjacent monitors (0.3–1.2 s) and leaves (2–12 s).
+- Monitors are 44° apart in head yaw: ±22° for two cameras, +44° / 0° / −44°
+  for three. Camera mounting biases are +4°, −6°, +2°.
+- Head turns take 350 ms per 44° (0.2–0.8 s).
 - Per-sample Gaussian pose noise, plus gross outliers (15–40°) and detection
   dropouts at the listed rates.
 - The face is lost beyond 60° relative yaw.
@@ -154,19 +155,41 @@ about 15–30 ms, §1a). A **false switch** is an auto switch to a camera the us
 is not facing, including any switch while looking down, at the gap, or away.
 
 Default settings (dwell 800 ms, min interval 1500 ms, margin 0.25, min score
-0.45, max gap 500 ms, min votes 3). `results/simulate.json`,
-`results/simulate-stress.json`:
+0.45, max gap 500 ms, min votes 3).
+
+**Two cameras** (`results/simulate.json`, `results/simulate-stress.json`):
 
 | Noise | Outliers | Dropouts | Labels | Switches | Correct | **False/h** | Missed | Latency p50 / p95 / max |
 |---|---|---|---|---|---|---|---|---|
-| 1.5° | 2% | 5% | 2880 | 1553 | 1553 | **0.00** | 0 | 1250 / 2000 / 4000 ms |
-| 3° | 2% | 5% | 2880 | 1553 | 1553 | **0.00** | 0 | 1250 / 2000 / 4000 ms |
-| 5° | 2% | 5% | 2880 | 1551 | 1551 | **0.00** | 0 | 1250 / 2250 / 5000 ms |
-| 8° | 2% | 5% | 2880 | 1553 | 1553 | **0.00** | 1 | 1250 / 2500 / 5250 ms |
-| 3° | 8% | 30% | 2889 | 1587 | 1587 | **0.00** | 12 | 1500 / 3500 / 5250 ms |
-| 5° | 8% | 30% | 2889 | 1587 | 1587 | **0.00** | 16 | 1500 / 3750 / 5250 ms |
+| 1.5° | 2% | 5% | 2941 | 1546 | 1546 | **0.00** | 0 | 1250 / 2000 / 4250 ms |
+| 3° | 2% | 5% | 2941 | 1548 | 1547 | **0.10** | 0 | 1250 / 2250 / 4250 ms |
+| 5° | 2% | 5% | 2941 | 1546 | 1546 | **0.00** | 0 | 1250 / 2250 / 5000 ms |
+| 8° | 2% | 5% | 2941 | 1546 | 1545 | **0.10** | 0 | 1250 / 2750 / 5000 ms |
+| 3° | 8% | 30% | 2853 | 1517 | 1517 | **0.00** | 9 | 1500 / 3750 / 5250 ms |
+| 5° | 8% | 30% | 2853 | 1515 | 1515 | **0.00** | 15 | 1500 / 3750 / 5250 ms |
 
-Strict dwell (`--strict`, max gap 0, any dropout restarts the dwell), for comparison:
+**Three cameras** (`results/simulate-3cam.json`, `results/simulate-3cam-stress.json`):
+
+| Noise | Outliers | Dropouts | Labels | Switches | Correct | **False/h** | Missed | Latency p50 / p95 / max |
+|---|---|---|---|---|---|---|---|---|
+| 1.5° | 2% | 5% | 2882 | 1704 | 1704 | **0.00** | 0 | 1250 / 2000 / 3750 ms |
+| 3° | 2% | 5% | 2882 | 1705 | 1704 | **0.10** | 0 | 1500 / 2000 / 3750 ms |
+| 5° | 2% | 5% | 2882 | 1710 | 1706 | **0.40** | 0 | 1500 / 2000 / 4250 ms |
+| 8° | 2% | 5% | 2882 | 1706 | 1704 | **0.20** | 2 | 1500 / 3000 / 5250 ms |
+| 3° | 8% | 30% | 2879 | 1687 | 1685 | **0.20** | 4 | 1750 / 3500 / 5250 ms |
+| 5° | 8% | 30% | 2879 | 1694 | 1689 | **0.50** | 10 | 1750 / 3500 / 5250 ms |
+
+With three cameras the median is a little higher, because turns between the
+outer monitors are twice as far (88°). The few false switches come from
+glances at a gap, where the runner-up margin is smallest.
+
+The two-camera numbers above come from the simulator as revised for N cameras
+(2026-10-19: distance-dependent head-turn time, farther "away" pose). They are
+not bit-identical to the first version's (0.00 false switches/h in every row,
+p50 1250 ms), but agree within 0.1 false switches per hour.
+
+Strict dwell (`--strict`, max gap 0, any dropout restarts the dwell), two
+cameras, first simulator version, for comparison:
 
 | Noise | Outliers | Dropouts | False/h | Missed | Latency p50 / p95 |
 |---|---|---|---|---|---|
@@ -204,7 +227,7 @@ ground-truth hotkeys).
 |---|---|
 | `cargo fmt --all -- --check` | exit 0 (`results/fmt.txt`) |
 | `cargo clippy --all-targets --release -- -D warnings` | exit 0 (`results/clippy.txt`) |
-| `cargo test --release` | 62 passed, 0 failed (`results/test.txt`) |
+| `cargo test --release` | 73 passed, 0 failed (`results/test.txt`) |
 
 Unit-test coverage by required area:
 
@@ -227,6 +250,14 @@ Unit-test coverage by required area:
   `back_to_auto_needs_fresh_dwell`, `manual_select_respects_following_min_interval`,
   `external_program_change_is_adopted`
 - **Pose geometry:** `face::tests::*` (synthetic rotated faces, off-centre correction)
+- **N cameras:** `config::tests::migrates_two_camera_config`,
+  `three_cameras_and_lookup`, `rejects_bad_camera_lists`,
+  `scoring::tests::decide_three_cameras_uses_runner_up`,
+  `calibration_three_cameras_uses_nearest_monitor`,
+  `control::tests::hotkeys_for_three_cameras`,
+  `diagnostics::tests::camera_routes`,
+  `simulate::tests::three_camera_session_meets_targets`,
+  `mouse::tests::mouse_switching_end_to_end_three_cameras`
 - **Mouse detector:** `mouse::tests::*`
   - two-display auto-mapping; three displays require configuration
   - several displays per camera; a display on both cameras is rejected
@@ -271,3 +302,40 @@ frames. AutoCam logged `right camera unavailable (Stale); will not switch to it`
 and refused every switch to it, as designed. `autocam reactivate` did not
 recover it. Restarting OBS did. This is recorded as a troubleshooting entry in
 SETUP.md.
+
+## 7. Three cameras, live: MEASURED
+
+Rig (2026-10-19): Dell Webcam WB7022 → `left` (LeftCam), Intel IPU laptop
+camera → `laptop` (LaptopCam), Logitech Webcam C930e → `right` (RightCam), all
+at 1920×1080, OBS canvas 1920×1080 @ 30 fps. Displays: left Dell (DISPLAY2) →
+`left`, laptop screen (DISPLAY1) → `laptop`, right Dell (DISPLAY3) → `right`.
+
+Setup, from the user's terminal: the existing two-camera config migrated on
+load. Then `obs-setup --camera left=dell --camera laptop=integrated --camera
+right=logitech` kept LeftCam/RightCam, re-pointed `AutoCam Right` at the
+Logitech, created LaptopCam / `AutoCam Laptop`, set all three to 1080p, fitted
+them to the frame and added 6 keepalive items. `map-monitors --assign
+left=DISPLAY2 --assign laptop=DISPLAY1 --assign right=DISPLAY3` wrote the
+mapping. All three cameras reported healthy.
+
+Scripted cursor test, `autocam run` with defaults (times UTC):
+
+| Step | Cursor | Expected | Observed |
+|---|---|---|---|
+| 1 | left Dell | stay on `left` | no switch |
+| 2 | laptop screen (18:45:36.889) | → `laptop` | switch at 37.498: **609 ms** (decision 404 ms + OBS ack 145 ms) |
+| 3 | right Dell (39.896) | → `right` | switch at 40.340: **444 ms** (308 + 91) |
+| 4 | left Dell for 150 ms, then back | no switch | no switch |
+| 5 | left Dell (45.558) | → `left` | switch at 46.134: **576 ms** (411 + 72) |
+| 6 | right Dell for 0.7 s (47.560) | → `right` | switch at 48.110: **550 ms** (393 + 65); flagged as a reversal (right → left → right within 5 s), as the statistic is designed to |
+| 7 | laptop screen (48.278) | → `laptop`, ≥ 1.5 s after step 6's switch | switch at 49.603, held by the minimum interval to exactly 1.50 s after step 6 (switcher clock) |
+
+Manual control over HTTP: `/select/left`, `/select/next` (→ `laptop`),
+`/select/3` (→ `right`), `/select/prev` (→ `laptop`) each switched and entered
+Manual mode. `/select/bogus` was ignored with a warning (HTTP 204, no switch).
+`/mode/auto` returned to the camera under the cursor.
+
+Resources with three 1080p cameras: AutoCam about 0.1–0.2% of the machine
+and 24 MB. OBS about 4.4–5.9% (AutoCam's own sampler). OBS acknowledged scene
+changes in 58–145 ms, against 11–17 ms with two cameras at their 640×480 /
+640×360 defaults.

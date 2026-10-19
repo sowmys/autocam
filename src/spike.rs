@@ -30,7 +30,6 @@ use crate::capture::Frame;
 use crate::config::Config;
 use crate::diagnostics::{Samples, Summary};
 use crate::obs::Obs;
-use crate::{CamId, PerCam};
 
 pub const IDLE_SCENE: &str = "AutoCam Spike Idle";
 
@@ -96,6 +95,7 @@ impl StateStats {
 
 #[derive(Debug, Default, Serialize, Clone)]
 pub struct CamStats {
+    pub name: String,
     pub source: String,
     pub selected: StateStats,
     pub other_selected: StateStats,
@@ -106,7 +106,7 @@ pub struct CamStats {
 pub struct PhaseReport {
     pub label: String,
     pub keepalive: bool,
-    pub cams: PerCam<CamStats>,
+    pub cams: Vec<CamStats>,
     pub scene_switch_ack_ms: Option<Summary>,
     pub achieved_fps_per_camera: f32,
     pub reliable: bool,
@@ -146,10 +146,7 @@ pub async fn run_spike(cfg: &Config, opts: &SpikeOptions) -> Result<SpikeReport>
     let keepalive = obs.keepalive_ok(cfg).await?;
     let original_program = obs.program_scene().await?;
 
-    let mut scenes = vec![
-        cfg.cameras.left.scene.clone(),
-        cfg.cameras.right.scene.clone(),
-    ];
+    let mut scenes: Vec<String> = cfg.cameras.iter().map(|c| c.scene.clone()).collect();
     if opts.include_idle {
         if !obs.scene_names().await?.contains(&IDLE_SCENE.to_owned()) {
             obs.client().scenes().create(IDLE_SCENE).await?;
@@ -166,12 +163,12 @@ pub async fn run_spike(cfg: &Config, opts: &SpikeOptions) -> Result<SpikeReport>
 
     let negative = if opts.negative_control {
         let inputs = obs.input_names().await?;
-        let mut cams: Vec<String> = CamId::ALL
+        let cams: Vec<String> = cfg
+            .cameras
             .iter()
-            .map(|c| cfg.camera(*c).source.clone())
+            .map(|c| c.source.clone())
             .filter(|s| inputs.contains(s))
             .collect();
-        cams.dedup();
         for s in &cams {
             obs.set_deactivate_when_hidden(s, true).await?;
         }
@@ -233,17 +230,16 @@ async fn phase(
     keepalive: bool,
     label: &str,
 ) -> Result<PhaseReport> {
-    let mut stats = PerCam::new(
-        CamStats {
-            source: cfg.cameras.left.source.clone(),
+    let mut stats: Vec<CamStats> = cfg
+        .cameras
+        .iter()
+        .map(|c| CamStats {
+            name: c.name.clone(),
+            source: c.source.clone(),
             ..Default::default()
-        },
-        CamStats {
-            source: cfg.cameras.right.source.clone(),
-            ..Default::default()
-        },
-    );
-    let mut last: PerCam<Option<Frame>> = PerCam::default();
+        })
+        .collect();
+    let mut last: Vec<Option<Frame>> = (0..cfg.cameras.len()).map(|_| None).collect();
     let mut ack = Samples::default();
     let mut ticker = tokio::time::interval(cfg.capture.period());
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -273,7 +269,7 @@ async fn phase(
             next_rotate += opts.rotate_every;
         }
         ticks += 1;
-        for cam in CamId::ALL {
+        for cam in cfg.cam_ids() {
             let src = &cfg.camera(cam).source;
             let active = obs
                 .source_active(src)
@@ -283,10 +279,10 @@ async fn phase(
             let t = Instant::now();
             let shot = obs.screenshot(cam, src, &cfg.capture).await;
             let ms = t.elapsed().as_secs_f32() * 1000.0;
-            let cs = stats.get_mut(cam);
+            let cs = &mut stats[cam.0];
             let st = if program == cfg.camera(cam).scene {
                 &mut cs.selected
-            } else if program == cfg.camera(cam.other()).scene {
+            } else if cfg.cam_for_scene(&program).is_some() {
                 &mut cs.other_selected
             } else {
                 &mut cs.neither
@@ -297,7 +293,7 @@ async fn phase(
                 Ok(frame) => {
                     st.latency.push(ms);
                     st.luma_sum += f64::from(frame.mean_luma);
-                    if let Some(prev) = last.get(cam) {
+                    if let Some(prev) = &last[cam.0] {
                         st.diff_sum += f64::from(prev.mean_abs_diff(&frame).unwrap_or(0.0));
                         if prev.fingerprint == frame.fingerprint {
                             st.identical += 1;
@@ -309,11 +305,11 @@ async fn phase(
                         }
                     }
                     // Only the latest frame per camera is kept, in memory.
-                    *last.get_mut(cam) = Some(frame);
+                    last[cam.0] = Some(frame);
                 }
                 Err(e) => {
                     st.failures += 1;
-                    warn!("{cam}: screenshot failed: {e}");
+                    warn!("camera `{}`: screenshot failed: {e}", cs.name);
                 }
             }
         }
@@ -322,8 +318,8 @@ async fn phase(
     let elapsed = start.elapsed().as_secs_f32();
 
     let mut reasons = Vec::new();
-    for cam in CamId::ALL {
-        let cs = stats.get_mut(cam);
+    for cs in &mut stats {
+        let cam = cs.name.clone();
         cs.neither.finish();
         for (state, st) in [
             ("own scene on Program", &mut cs.selected),
@@ -402,8 +398,7 @@ pub fn print_report(r: &SpikeReport) {
             "p50 ms",
             "p95 ms"
         );
-        for cam in CamId::ALL {
-            let cs = p.cams.get(cam);
+        for cs in &p.cams {
             for (state, st) in [
                 ("own scene", &cs.selected),
                 ("other cam scene", &cs.other_selected),
@@ -417,7 +412,7 @@ pub fn print_report(r: &SpikeReport) {
                     .map_or((f32::NAN, f32::NAN), |l| (l.p50, l.p95));
                 println!(
                     "{:<6} {:<20} {:<16} {:>7} {:>5} {:>6.1}% {:>7} {:>5.0}% {:>8.2} {:>6.1} {:>7.1} {:>7.1}",
-                    cam.name(),
+                    cs.name,
                     cs.source,
                     state,
                     st.samples,

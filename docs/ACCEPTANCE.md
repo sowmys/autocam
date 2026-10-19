@@ -1,6 +1,6 @@
 # Manual acceptance test
 
-Run on the target machine with two physical webcams, OBS configured per
+Run on the target machine with its webcams (two or more), OBS configured per
 [SETUP.md](SETUP.md), and `autocam.exe` built in release mode. Each step has a
 pass criterion. Record results in the table at the end.
 
@@ -14,8 +14,8 @@ Before you start, have:
 
 | # | Step | Pass |
 |---|---|---|
-| A1 | `autocam obs-setup --left-device "<L>" --right-device "<R>"` | Prints "OBS scenes ready". OBS shows `LeftCam` and `RightCam`, each with its camera full-frame and a locked keepalive item off-canvas |
-| A2 | `autocam spike --seconds 60 --negative-control --json spike.json` | Main phase `reliable: true`, VERDICT RELIABLE; for both cameras **other cam scene** fresh% ≥ 95, fail 0, p95 ≤ 150 ms. Negative control *not* reliable (shows that staleness is detected) |
+| A1 | `autocam obs-setup --camera <name>=<device> ...` (once per camera) | Prints "OBS scenes ready" and lists the cameras. OBS shows one scene per camera, each with its camera full-frame and the other cameras as locked keepalive items off-canvas |
+| A2 | `autocam spike --seconds 60 --negative-control --json spike.json` | Main phase `reliable: true`, VERDICT RELIABLE; for every camera **other cam scene** fresh% ≥ 95, fail 0, p95 ≤ 150 ms. Negative control *not* reliable (shows that staleness is detected) |
 | A3 | `autocam spike --seconds 60 --without-keepalive` (keepalive items are disabled for the run, then restored) | Informational. If **other cam scene** fresh% < 95 here but A2 passes, keep the keepalive items; your cameras need them |
 
 If A2 fails *with* keepalive, the OBS-screenshot design is not viable on this
@@ -32,17 +32,21 @@ keep its console visible.
 |---|---|---|
 | M1 | `autocam monitors` | Lists every display with size and position. Mapping shows each camera's displays; others `-> keep current camera` |
 | M2 | `autocam watch`, move the mouse across all displays | Each display prints the expected camera (or "keep current camera") |
-| M3 | In `run`: park the cursor on a display of the *other* camera | Switches once, about 0.3–0.5 s later. Log `switch … (Auto) … cursor on \\.\DISPLAYn` |
-| M4 | Flick the cursor onto the other camera's display for under 200 ms and back (10 times) | **No** switch |
-| M5 | Park the cursor on an unmapped display for 10 s | **No** switch |
-| M6 | Move to the other camera's display for about 0.7 s, then straight back | Two switches at most, the second ≥ 1.5 s after the first |
+| M3 | In `run`: park the cursor on each camera's display in turn | Each time switches once to that camera, about 0.3–0.6 s later. Log `switch … (Auto) … cursor on DISPLAYn` |
+| M4 | Flick the cursor onto another camera's display for under 200 ms and back (10 times) | **No** switch |
+| M5 | Park the cursor on an unmapped display (if any) for 10 s | **No** switch |
+| M6 | Move to another camera's display for about 0.7 s, then on to a third camera's (or straight back) | Two switches at most, the second ≥ 1.5 s after the first |
 | M7 | Cover or disable one camera (shutter / unplug), then put the cursor on its display | Log `… camera unavailable (…); will not switch to it` within a few seconds. **No** switch to it. After it recovers (`autocam reactivate`, or restart OBS if it stays frozen) switching resumes |
 | M8 | Lock the screen (Win+L) for 10 s and unlock | No switch while locked. No crash |
 
-Dev rig, 2026-10-14 (left Dell → LeftCam, laptop screen → RightCam, right Dell
-unmapped): M1–M7 passed, with M3–M6 scripted. M7 occurred naturally when the
-laptop camera froze, and AutoCam refused to switch to it. See
-[RESULTS.md §6](RESULTS.md#6-mouse-detector-live-measured).
+Dev rig, 2026-10-14, two cameras (left Dell → LeftCam, laptop screen →
+RightCam, right Dell unmapped): M1–M7 passed, with M3–M6 scripted. M7 occurred
+naturally when the laptop camera froze, and AutoCam refused to switch to it.
+See [RESULTS.md §6](RESULTS.md#6-mouse-detector-live-measured).
+
+Dev rig, 2026-10-19, three cameras (left Dell → `left`, laptop screen →
+`laptop`, right Dell → `right`): M1–M4 and M6 passed, scripted. See
+[RESULTS.md §7](RESULTS.md#7-three-cameras-live-measured).
 
 Sections B and C below are for **face mode** only (`--detector face`).
 Sections D–F apply to both detectors.
@@ -68,17 +72,18 @@ Start `autocam --detector face run` and keep its console visible.
 | C5 | Look down at the keyboard for 10 s, from either monitor | **No** switch |
 | C6 | Look at the gap between monitors for 10 s | **No** switch |
 | C7 | Walk out of frame for 20 s, come back facing the *other* monitor | No switch while away. Switches about 1 s after you are back and facing it |
-| C8 | Cover one camera's lens with your hand for 10 s while facing *that* monitor | No switch to the other camera. Status shows `black` or `noface` for the covered camera |
+| C8 | Cover one camera's lens with your hand for 10 s while facing *that* monitor | No switch to another camera. Status shows `black` or `noface` for the covered camera |
 | C9 | Another person walks behind you | No switch (the nearest face is tracked) |
 
 ## D. Manual control and modes
 
 | # | Step | Pass |
 |---|---|---|
-| D1 | Press Ctrl+Alt+Right while using the left monitor (cursor there / facing it) | Immediate switch to RightCam. Log `manual select right`. Mode Manual |
+| D1 | Press Ctrl+Alt+3 (or the number of a camera other than the one you're using) | Immediate switch to that camera. Log ``manual select `right` ``. Mode Manual |
+| D1b | Press Ctrl+Alt+Right, then Ctrl+Alt+Left | Next camera, then back (wrapping around at the ends) |
 | D2 | Keep using the left monitor for 10 s | Stays on RightCam (manual override sticks) |
-| D3 | Ctrl+Alt+A (back to Auto) | Returns to LeftCam within about 0.5 s (mouse) or 1 s (face) |
-| D4 | `curl.exe -X POST -H "X-AutoCam: 1" http://127.0.0.1:8787/select/left` | HTTP 204, switch, mode Manual |
+| D3 | Ctrl+Alt+A (back to Auto) | Returns to the camera you are using within about 0.5 s (mouse) or 1 s (face) |
+| D4 | `curl.exe -X POST -H "X-AutoCam: 1" http://127.0.0.1:8787/select/left` (also try `/select/2` and `/select/next`) | HTTP 204, switch, mode Manual |
 | D5 | `curl.exe -X POST http://127.0.0.1:8787/select/right` (no header) | HTTP 403, no switch |
 | D6 | Click a scene in OBS by hand while in Auto | AutoCam logs "program scene changed in OBS … adopting" and does not snap back for at least 1.5 s |
 | D7 | Quit with `q`, restart `autocam run` | Mode from before quitting is restored (stored in config.toml) |
@@ -106,12 +111,12 @@ Start `autocam --detector face run` and keep its console visible.
 Mouse mode needs no labels: read `switches.decision_latency_ms` (cursor
 settles → switch command, about 300–400 ms) and `switches.obs_ack_ms` from
 `/status` after normal work. Its false-switch rate is, by construction, the
-rate of parking the cursor ≥ 300 ms on the other camera's display without
+rate of parking the cursor ≥ 300 ms on another camera's display without
 meaning to.
 
 **Face mode:** run 15 minutes of normal work with `autocam --detector face run`, labelling ground truth as you
-go: **Ctrl+Alt+Shift+Left / Right** when you turn to that monitor and keep
-working there, **Ctrl+Alt+Shift+Down** when you look at keyboard, notes or phone.
+go: **Ctrl+Alt+Shift+1 / 2 / 3** when you turn to that camera's monitor and keep
+working there, **Ctrl+Alt+Shift+0** when you look at keyboard, notes or phone.
 Then read `curl.exe http://127.0.0.1:8787/status`:
 
 | Metric | Where | Target | Measured |

@@ -13,11 +13,15 @@ use autocam::obs::Obs;
 async fn main() -> anyhow::Result<()> {
     let cfg = Config::load(&Config::default_path())?;
     let obs = Obs::connect(&cfg.obs).await?;
-    let cam: CamId = std::env::args()
-        .nth(1)
-        .map_or(Ok(CamId::Left), |s| s.parse())
-        .map_err(anyhow::Error::msg)?;
-    println!("camera: {cam} (`{}`)", cfg.camera(cam).source);
+    let key = std::env::args().nth(1).unwrap_or_else(|| "1".into());
+    let cam: CamId = cfg
+        .find_camera(&key)
+        .ok_or_else(|| anyhow::anyhow!("no camera `{key}` (use a name or number)"))?;
+    println!(
+        "camera: {} (`{}`)",
+        cfg.cam_name(cam),
+        cfg.camera(cam).source
+    );
     let mut prev: Option<u64> = None;
     for i in 0..8 {
         let f = obs

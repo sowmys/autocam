@@ -21,7 +21,7 @@ use crate::scoring::{
     self, CalibrationSamples, CamSignal, DecisionParams, PhaseSamples, fit_calibration,
 };
 use crate::switching::{Event, Mode, SwitchParams, Switcher};
-use crate::{CamId, PerCam};
+use crate::{CamId, Cams};
 
 /// SplitMix64: tiny, deterministic, good enough for simulation.
 pub struct Rng(u64);
@@ -61,18 +61,18 @@ impl Rng {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Gaze {
-    Left,
-    Right,
+    /// Facing monitor `i` (the one with camera `i`).
+    Monitor(usize),
     Down,
-    Between,
+    /// Looking at the gap between monitors `i` and `i + 1`.
+    Between(usize),
     Away,
 }
 
 impl Gaze {
     fn label(self) -> Option<CamId> {
         match self {
-            Gaze::Left => Some(CamId::Left),
-            Gaze::Right => Some(CamId::Right),
+            Gaze::Monitor(i) => Some(CamId(i)),
             _ => None,
         }
     }
@@ -88,25 +88,42 @@ pub struct SimParams {
     pub outlier_p: f32,
     /// Probability per sample that a visible face is not detected.
     pub dropout_p: f32,
-    /// Head yaw of each monitor's centre (world frame), degrees.
-    pub monitor_yaw: (f32, f32),
+    /// Head yaw of each monitor's centre (world frame), degrees, one per
+    /// camera, left to right.
+    pub monitor_yaw: Vec<f32>,
     /// Extra yaw each camera sees because of its mounting angle.
-    pub mount_bias: (f32, f32),
+    pub mount_bias: Vec<f32>,
     pub fps: f32,
 }
 
 impl Default for SimParams {
     fn default() -> Self {
+        Self::for_cameras(2)
+    }
+}
+
+impl SimParams {
+    /// `n` monitors side by side, 44 degrees apart (two 32" monitors at arm's
+    /// length), each camera mounted a few degrees off-axis.
+    pub fn for_cameras(n: usize) -> Self {
+        let n = n.max(2);
+        let span = 44.0 * (n - 1) as f32;
+        let monitor_yaw = (0..n).map(|i| span / 2.0 - 44.0 * i as f32).collect();
+        let mount_bias = (0..n).map(|i| [4.0, -6.0, 2.0, -3.0][i % 4]).collect();
         Self {
             hours: 2.0,
             seed: 1,
             noise_deg: 3.0,
             outlier_p: 0.02,
             dropout_p: 0.05,
-            monitor_yaw: (22.0, -22.0),
-            mount_bias: (4.0, -6.0),
+            monitor_yaw,
+            mount_bias,
             fps: 4.0,
         }
+    }
+
+    pub fn cameras(&self) -> usize {
+        self.monitor_yaw.len()
     }
 }
 
@@ -121,28 +138,31 @@ struct World<'a> {
 }
 
 impl World<'_> {
+    fn n(&self) -> usize {
+        self.p.cameras()
+    }
+
     fn target(&mut self, g: Gaze) -> (f32, f32) {
-        let (l, r) = self.p.monitor_yaw;
+        let m = &self.p.monitor_yaw;
+        let mid = (m[0] + m[m.len() - 1]) / 2.0;
         match g {
             // Users look at different parts of a monitor, not just the centre.
-            Gaze::Left => (l + self.rng.range(-6.0, 6.0), self.rng.range(-5.0, 4.0)),
-            Gaze::Right => (r + self.rng.range(-6.0, 6.0), self.rng.range(-5.0, 4.0)),
-            Gaze::Down => (self.rng.range(-10.0, 10.0), self.rng.range(-40.0, -28.0)),
-            Gaze::Between => (
-                (l + r) / 2.0 + self.rng.range(-4.0, 4.0),
+            Gaze::Monitor(i) => (m[i] + self.rng.range(-6.0, 6.0), self.rng.range(-5.0, 4.0)),
+            Gaze::Down => (
+                mid + self.rng.range(-10.0, 10.0),
+                self.rng.range(-40.0, -28.0),
+            ),
+            Gaze::Between(i) => (
+                (m[i] + m[i + 1]) / 2.0 + self.rng.range(-4.0, 4.0),
                 self.rng.range(-3.0, 3.0),
             ),
-            Gaze::Away => (if self.rng.chance(0.5) { 95.0 } else { -95.0 }, 0.0),
+            Gaze::Away => (if self.rng.chance(0.5) { 120.0 } else { -120.0 }, 0.0),
         }
     }
 
     /// What camera `cam` reports for this head pose (None = no face).
     fn observe(&mut self, cam: CamId, h: &Head) -> Option<HeadPose> {
-        let (cam_yaw, bias) = match cam {
-            CamId::Left => (self.p.monitor_yaw.0, self.p.mount_bias.0),
-            CamId::Right => (self.p.monitor_yaw.1, self.p.mount_bias.1),
-        };
-        let rel_yaw = h.yaw - cam_yaw + bias;
+        let rel_yaw = h.yaw - self.p.monitor_yaw[cam.0] + self.p.mount_bias[cam.0];
         if rel_yaw.abs() > 60.0 || self.rng.chance(self.p.dropout_p) {
             return None;
         }
@@ -160,37 +180,38 @@ impl World<'_> {
         })
     }
 
+    fn pick(&mut self, n: usize) -> usize {
+        ((self.rng.unit() * n as f32) as usize).min(n - 1)
+    }
+
     fn next_gaze(&mut self, g: Gaze) -> (Gaze, f32) {
+        let n = self.n();
         let r = self.rng.unit();
         let next = match g {
-            Gaze::Left | Gaze::Right => {
-                let other = if g == Gaze::Left {
-                    Gaze::Right
-                } else {
-                    Gaze::Left
-                };
+            Gaze::Monitor(i) => {
                 if r < 0.55 {
-                    other
+                    // Another monitor, uniformly.
+                    let j = self.pick(n - 1);
+                    Gaze::Monitor(if j >= i { j + 1 } else { j })
                 } else if r < 0.80 {
                     Gaze::Down
                 } else if r < 0.97 {
-                    Gaze::Between
+                    // A gap next to the current monitor.
+                    let gaps: Vec<usize> = [i.checked_sub(1), (i + 1 < n).then_some(i)]
+                        .into_iter()
+                        .flatten()
+                        .collect();
+                    Gaze::Between(gaps[self.pick(gaps.len())])
                 } else {
                     Gaze::Away
                 }
             }
-            _ => {
-                if r < 0.5 {
-                    Gaze::Left
-                } else {
-                    Gaze::Right
-                }
-            }
+            _ => Gaze::Monitor(self.pick(n)),
         };
         let dur = match next {
-            Gaze::Left | Gaze::Right => self.rng.range(3.0, 30.0),
+            Gaze::Monitor(_) => self.rng.range(3.0, 30.0),
             Gaze::Down => self.rng.range(0.8, 8.0),
-            Gaze::Between => self.rng.range(0.3, 1.2),
+            Gaze::Between(_) => self.rng.range(0.3, 1.2),
             Gaze::Away => self.rng.range(2.0, 12.0),
         };
         (next, dur)
@@ -213,6 +234,7 @@ pub struct SimResult {
 }
 
 pub fn simulate(p: &SimParams, decision: DecisionParams, switch: SwitchParams) -> SimResult {
+    let n = p.cameras();
     let mut w = World {
         p,
         rng: Rng::new(p.seed),
@@ -220,28 +242,23 @@ pub fn simulate(p: &SimParams, decision: DecisionParams, switch: SwitchParams) -
     let dt = Duration::from_secs_f32(1.0 / p.fps);
 
     // 1. Calibrate with the same noisy observation model, 3 s per phase.
-    let mut phase = |g: Gaze| {
-        let (yaw, pitch) = match g {
-            Gaze::Left => (p.monitor_yaw.0, 0.0),
-            Gaze::Right => (p.monitor_yaw.1, 0.0),
-            _ => (0.0, -34.0),
-        };
+    let mut phase = |yaw: f32, pitch: f32| {
         let h = Head { yaw, pitch };
-        let mut s = PhaseSamples::default();
+        let mut s = PhaseSamples::new(n);
         for _ in 0..(3.0 * p.fps) as usize {
             s.frames += 1;
-            for cam in CamId::ALL {
-                if let Some(o) = w.observe(cam, &h) {
-                    s.poses.get_mut(cam).push(o);
+            for c in 0..n {
+                if let Some(o) = w.observe(CamId(c), &h) {
+                    s.poses.get_mut(CamId(c)).push(o);
                 }
             }
         }
         s
     };
+    let mid = (p.monitor_yaw[0] + p.monitor_yaw[n - 1]) / 2.0;
     let samples = CalibrationSamples {
-        look_left: phase(Gaze::Left),
-        look_right: phase(Gaze::Right),
-        look_down: Some(phase(Gaze::Down)),
+        phases: p.monitor_yaw.iter().map(|&y| phase(y, 0.0)).collect(),
+        look_down: Some(phase(mid, -34.0)),
     };
     let (cal, report) = fit_calibration(&samples, decision.margin, 0)
         .expect("synthetic calibration should succeed");
@@ -253,10 +270,10 @@ pub fn simulate(p: &SimParams, decision: DecisionParams, switch: SwitchParams) -
     let mut sw = Switcher::new(switch, Mode::Auto);
     sw.handle(Event::ProgramScene {
         now,
-        cam: Some(CamId::Left),
+        cam: Some(CamId(0)),
     });
     let mut eval = EvalTracker::new(Duration::from_secs(5));
-    let mut gaze = Gaze::Left;
+    let mut gaze = Gaze::Monitor(0);
     eval.on_label(now, gaze.label(), sw.current());
     let mut seg_end = now + Duration::from_secs(10);
     let (ty, tp) = w.target(gaze);
@@ -264,7 +281,8 @@ pub fn simulate(p: &SimParams, decision: DecisionParams, switch: SwitchParams) -
     let mut from = (head.yaw, head.pitch);
     let mut to = from;
     let mut move_start = now;
-    let move_time = 0.35f32;
+    // Turning further takes longer: ~0.35 s per 44 deg.
+    let mut move_time = 0.35f32;
     let mut auto = 0u64;
 
     while now < end {
@@ -275,6 +293,7 @@ pub fn simulate(p: &SimParams, decision: DecisionParams, switch: SwitchParams) -
             seg_end = now + Duration::from_secs_f32(dur);
             from = (head.yaw, head.pitch);
             to = w.target(g);
+            move_time = (0.35 * (to.0 - from.0).abs() / 44.0).clamp(0.2, 0.8);
             move_start = now;
             eval.on_label(now, gaze.label(), sw.current());
         }
@@ -285,11 +304,16 @@ pub fn simulate(p: &SimParams, decision: DecisionParams, switch: SwitchParams) -
         head.yaw += 0.8 * w.rng.normal();
         head.pitch += 0.8 * w.rng.normal();
 
-        let signals =
-            PerCam::new(CamId::Left, CamId::Right).map(|_, cam| match w.observe(cam, &head) {
-                Some(pose) => CamSignal::Face(scoring::score_pose(cal.camera(cam), &pose)),
-                None => CamSignal::NoFace,
-            });
+        let signals = Cams(
+            (0..n)
+                .map(|c| match w.observe(CamId(c), &head) {
+                    Some(pose) => {
+                        CamSignal::Face(scoring::score_pose(&cal.camera(CamId(c)), &pose))
+                    }
+                    None => CamSignal::NoFace,
+                })
+                .collect(),
+        );
         let d = scoring::decide(&signals, decision);
         if let Some(cmd) = sw.handle(Event::Tick { now, decision: d }) {
             auto += 1;
@@ -315,7 +339,8 @@ pub fn simulate(p: &SimParams, decision: DecisionParams, switch: SwitchParams) -
 
 pub fn print_results(results: &[SimResult]) {
     println!(
-        "\n{:>6} {:>8} {:>8} {:>6} | {:>8} {:>8} {:>8} {:>9} {:>7} | {:>8} {:>8} {:>8}",
+        "\n{:>4} {:>6} {:>8} {:>8} {:>6} | {:>8} {:>8} {:>8} {:>9} {:>7} | {:>8} {:>8} {:>8}",
+        "cams",
         "noise",
         "outlier",
         "dropout",
@@ -334,7 +359,8 @@ pub fn print_results(results: &[SimResult]) {
             .latency_ms
             .map_or((f32::NAN, f32::NAN, f32::NAN), |l| (l.p50, l.p95, l.max));
         println!(
-            "{:>5.1}° {:>7.1}% {:>7.1}% {:>6.1} | {:>8} {:>8} {:>8} {:>9.2} {:>7} | {:>6.0}ms {:>6.0}ms {:>6.0}ms",
+            "{:>4} {:>5.1}° {:>7.1}% {:>7.1}% {:>6.1} | {:>8} {:>8} {:>8} {:>9.2} {:>7} | {:>6.0}ms {:>6.0}ms {:>6.0}ms",
+            r.params.cameras(),
             r.params.noise_deg,
             100.0 * r.params.outlier_p,
             100.0 * r.params.dropout_p,
@@ -395,6 +421,22 @@ mod tests {
         let lat = r.latency_ms.expect("some switches");
         // Dwell 800 ms + head turn + tick quantization.
         assert!(lat.p50 >= 800.0 && lat.p50 < 1600.0, "{lat:?}");
+    }
+
+    #[test]
+    fn three_camera_session_meets_targets() {
+        let (d, s) = defaults();
+        let p = SimParams {
+            hours: 0.5,
+            ..SimParams::for_cameras(3)
+        };
+        assert_eq!(p.monitor_yaw, vec![44.0, 0.0, -44.0]);
+        let r = simulate(&p, d, s);
+        assert!(r.correct_switches > 20, "{r:?}");
+        assert!(r.false_switches_per_hour < 2.0, "{r:?}");
+        assert!(r.calibration_warnings.is_empty(), "{r:?}");
+        let lat = r.latency_ms.expect("some switches");
+        assert!(lat.p50 >= 800.0 && lat.p50 < 1800.0, "{lat:?}");
     }
 
     #[test]

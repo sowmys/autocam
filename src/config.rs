@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::scoring::Calibration;
 use crate::switching::Mode;
-use crate::{CamId, PerCam};
+use crate::{CamId, MAX_CAMERAS};
 
 pub const PASSWORD_ENV: &str = "AUTOCAM_OBS_PASSWORD";
 
@@ -33,7 +33,10 @@ pub enum DetectorKind {
 pub struct Config {
     pub detector: DetectorKind,
     pub obs: ObsConfig,
-    pub cameras: PerCam<CameraConfig>,
+    /// The cameras, in order (camera 1, 2, ...). Accepts the old two-camera
+    /// `[cameras.left]` / `[cameras.right]` form and migrates it.
+    #[serde(deserialize_with = "de_cameras")]
+    pub cameras: Vec<CameraConfig>,
     pub capture: CaptureConfig,
     pub face: FaceConfig,
     pub switching: SwitchingConfig,
@@ -50,16 +53,7 @@ impl Default for Config {
             detector: DetectorKind::default(),
             mouse: MouseConfig::default(),
             obs: ObsConfig::default(),
-            cameras: PerCam::new(
-                CameraConfig {
-                    source: "AutoCam Left".into(),
-                    scene: "LeftCam".into(),
-                },
-                CameraConfig {
-                    source: "AutoCam Right".into(),
-                    scene: "RightCam".into(),
-                },
-            ),
+            cameras: vec![CameraConfig::named("left"), CameraConfig::named("right")],
             capture: CaptureConfig::default(),
             face: FaceConfig::default(),
             switching: SwitchingConfig::default(),
@@ -121,10 +115,64 @@ impl ObsConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CameraConfig {
+    /// Short name used on the command line, HTTP and logs (`left`, `laptop`).
+    pub name: String,
     /// OBS input (or scene) to sample with GetSourceScreenshot.
     pub source: String,
     /// OBS scene to put on Program when this camera is selected.
     pub scene: String,
+    /// Mouse detector: displays that select this camera, by device name
+    /// (`DISPLAY2` or `\\.\DISPLAY2`; see `autocam monitors`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub monitors: Vec<String>,
+}
+
+impl CameraConfig {
+    /// Default OBS names for a camera: `left` -> input `AutoCam Left`, scene `LeftCam`.
+    pub fn named(name: &str) -> Self {
+        let mut title = name.to_owned();
+        if let Some(first) = title.get_mut(0..1) {
+            first.make_ascii_uppercase();
+        }
+        Self {
+            name: name.to_owned(),
+            source: format!("AutoCam {title}"),
+            scene: format!("{title}Cam"),
+            monitors: Vec::new(),
+        }
+    }
+}
+
+/// The pre-N-camera layout: `[cameras.left]` and `[cameras.right]`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum CamerasRepr {
+    List(Vec<CameraConfig>),
+    Legacy {
+        left: LegacyCamera,
+        right: LegacyCamera,
+    },
+}
+
+#[derive(Deserialize)]
+struct LegacyCamera {
+    source: String,
+    scene: String,
+}
+
+fn de_cameras<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<CameraConfig>, D::Error> {
+    Ok(match CamerasRepr::deserialize(d)? {
+        CamerasRepr::List(v) => v,
+        CamerasRepr::Legacy { left, right } => [("left", left), ("right", right)]
+            .into_iter()
+            .map(|(name, c)| CameraConfig {
+                name: name.to_owned(),
+                source: c.source,
+                scene: c.scene,
+                monitors: Vec::new(),
+            })
+            .collect(),
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -276,11 +324,11 @@ impl SwitchingConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct MouseConfig {
-    /// Displays that select the left camera, by device name (`DISPLAY2` or
-    /// `\\.\DISPLAY2`; see `autocam monitors`). Empty on both sides with
-    /// exactly two displays: leftmost -> left camera, rightmost -> right.
+    /// Old two-camera form, migrated into `cameras[0].monitors` on load.
+    #[serde(skip_serializing)]
     pub left_monitors: Vec<String>,
-    /// Displays that select the right camera.
+    /// Old two-camera form, migrated into `cameras[1].monitors` on load.
+    #[serde(skip_serializing)]
     pub right_monitors: Vec<String>,
     /// Cursor polls per second.
     pub poll_hz: f32,
@@ -325,8 +373,9 @@ pub struct DiagnosticsConfig {
     /// Serve `/status` and the control endpoints. Loopback only.
     pub http_enabled: bool,
     pub http_bind: SocketAddr,
-    /// Global hotkeys: Ctrl+Alt+Left/Right select, Ctrl+Alt+A toggles auto,
-    /// Ctrl+Alt+Shift+Left/Right label ground truth for measurements.
+    /// Global hotkeys: Ctrl+Alt+1..9 select a camera, Ctrl+Alt+Left/Right the
+    /// previous/next one, Ctrl+Alt+A toggles auto, Ctrl+Alt+Shift+1..9 / 0
+    /// label ground truth for measurements.
     pub hotkeys: bool,
     /// Seconds between summary log lines.
     pub summary_interval_s: u64,
@@ -357,13 +406,39 @@ impl Config {
     /// Loads the file, or defaults if it does not exist.
     pub fn load(path: &Path) -> Result<Self> {
         let cfg = match std::fs::read_to_string(path) {
-            Ok(text) => toml::from_str::<Config>(&text)
-                .with_context(|| format!("parsing {}", path.display()))?,
+            Ok(text) => {
+                Self::from_toml(&text).with_context(|| format!("parsing {}", path.display()))?
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
             Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
         };
         cfg.validate()?;
         Ok(cfg)
+    }
+
+    /// Parses TOML and migrates older layouts.
+    pub fn from_toml(text: &str) -> Result<Self> {
+        let mut cfg: Config = toml::from_str(text)?;
+        cfg.migrate();
+        Ok(cfg)
+    }
+
+    /// Moves `[mouse] left_monitors/right_monitors` (two-camera era) into
+    /// the first two cameras' `monitors`.
+    fn migrate(&mut self) {
+        for (i, legacy) in [
+            std::mem::take(&mut self.mouse.left_monitors),
+            std::mem::take(&mut self.mouse.right_monitors),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if let Some(cam) = self.cameras.get_mut(i)
+                && cam.monitors.is_empty()
+            {
+                cam.monitors = legacy;
+            }
+        }
     }
 
     /// Writes atomically (temp file + rename) so a crash cannot truncate it.
@@ -392,8 +467,46 @@ impl Config {
                 self.diagnostics.http_bind
             );
         }
-        if self.cameras.left.scene == self.cameras.right.scene {
-            bail!("cameras.left.scene and cameras.right.scene must differ");
+        if !(2..=MAX_CAMERAS).contains(&self.cameras.len()) {
+            bail!(
+                "{} cameras configured; AutoCam needs 2 to {MAX_CAMERAS}",
+                self.cameras.len()
+            );
+        }
+        for (i, c) in self.cameras.iter().enumerate() {
+            validate_name(&c.name)?;
+            for d in &self.cameras[..i] {
+                if d.name.eq_ignore_ascii_case(&c.name) {
+                    bail!("two cameras are named `{}`", c.name);
+                }
+                if d.scene == c.scene {
+                    bail!(
+                        "cameras `{}` and `{}` use the same scene `{}`",
+                        d.name,
+                        c.name,
+                        c.scene
+                    );
+                }
+                if d.source == c.source {
+                    bail!(
+                        "cameras `{}` and `{}` use the same source `{}`",
+                        d.name,
+                        c.name,
+                        c.source
+                    );
+                }
+                if let Some(m) = c
+                    .monitors
+                    .iter()
+                    .find(|m| d.monitors.iter().any(|n| same_display(n, m)))
+                {
+                    bail!(
+                        "display `{m}` is mapped to both `{}` and `{}`",
+                        d.name,
+                        c.name
+                    );
+                }
+            }
         }
         let s = &self.switching;
         if !(0.0..=1.0).contains(&s.confidence_margin) || !(0.0..=1.0).contains(&s.min_score) {
@@ -412,15 +525,64 @@ impl Config {
     }
 
     pub fn camera(&self, cam: CamId) -> &CameraConfig {
-        self.cameras.get(cam)
+        &self.cameras[cam.0]
+    }
+
+    pub fn cam_name(&self, cam: CamId) -> &str {
+        self.cameras.get(cam.0).map_or("?", |c| c.name.as_str())
+    }
+
+    pub fn cam_ids(&self) -> impl Iterator<Item = CamId> + use<> {
+        (0..self.cameras.len()).map(CamId)
     }
 
     /// Which camera a scene name belongs to, if any.
     pub fn cam_for_scene(&self, scene: &str) -> Option<CamId> {
-        CamId::ALL
-            .into_iter()
-            .find(|c| self.cameras.get(*c).scene == scene)
+        self.cameras
+            .iter()
+            .position(|c| c.scene == scene)
+            .map(CamId)
     }
+
+    /// A camera by name (case-insensitive) or 1-based number.
+    pub fn find_camera(&self, key: &str) -> Option<CamId> {
+        let key = key.trim();
+        if let Ok(n) = key.parse::<usize>() {
+            return (1..=self.cameras.len()).contains(&n).then(|| CamId(n - 1));
+        }
+        self.cameras
+            .iter()
+            .position(|c| c.name.eq_ignore_ascii_case(key))
+            .map(CamId)
+    }
+}
+
+/// Words with a meaning of their own in commands and URLs.
+const RESERVED_NAMES: [&str; 5] = ["next", "prev", "none", "all", "auto"];
+
+fn validate_name(name: &str) -> Result<()> {
+    let ok = !name.is_empty()
+        && name.len() <= 32
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+        && !name.chars().all(|c| c.is_ascii_digit())
+        && !RESERVED_NAMES.contains(&name);
+    if ok {
+        Ok(())
+    } else {
+        bail!(
+            "camera name `{name}` is invalid: use lowercase letters, digits, - or _ (not only digits, not {})",
+            RESERVED_NAMES.join("/")
+        )
+    }
+}
+
+/// `DISPLAY2` and `\\.\DISPLAY2` name the same display.
+pub fn same_display(a: &str, b: &str) -> bool {
+    a.trim()
+        .trim_start_matches(r"\\.\")
+        .eq_ignore_ascii_case(b.trim().trim_start_matches(r"\\.\"))
 }
 
 pub fn is_loopback_host(host: &str) -> bool {
@@ -475,6 +637,81 @@ mod tests {
         let dbg = format!("{cfg:?}");
         assert!(!dbg.contains("hunter2"));
         assert!(dbg.contains("<redacted>"));
+    }
+
+    #[test]
+    fn migrates_two_camera_config() {
+        let old = r#"
+[cameras.left]
+source = "AutoCam Left"
+scene = "LeftCam"
+
+[cameras.right]
+source = "AutoCam Right"
+scene = "RightCam"
+
+[mouse]
+left_monitors = ["DISPLAY2"]
+right_monitors = ["DISPLAY1"]
+dwell_ms = 250
+"#;
+        let cfg = Config::from_toml(old).unwrap();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.cameras.len(), 2);
+        assert_eq!(cfg.cameras[0].name, "left");
+        assert_eq!(cfg.cameras[0].monitors, vec!["DISPLAY2".to_owned()]);
+        assert_eq!(cfg.cameras[1].scene, "RightCam");
+        assert_eq!(cfg.cameras[1].monitors, vec!["DISPLAY1".to_owned()]);
+        assert_eq!(cfg.mouse.dwell_ms, 250);
+        // Saved in the new form only.
+        let text = toml::to_string_pretty(&cfg).unwrap();
+        assert!(text.contains("[[cameras]]") && !text.contains("left_monitors"));
+        assert_eq!(Config::from_toml(&text).unwrap(), cfg);
+    }
+
+    #[test]
+    fn three_cameras_and_lookup() {
+        let cfg = Config {
+            cameras: ["left", "laptop", "right"]
+                .iter()
+                .map(|n| CameraConfig::named(n))
+                .collect(),
+            ..Default::default()
+        };
+        cfg.validate().unwrap();
+        assert_eq!(cfg.cameras[1].source, "AutoCam Laptop");
+        assert_eq!(cfg.cameras[1].scene, "LaptopCam");
+        assert_eq!(cfg.find_camera("Laptop"), Some(CamId(1)));
+        assert_eq!(cfg.find_camera("3"), Some(CamId(2)));
+        assert_eq!(cfg.find_camera("4"), None);
+        assert_eq!(cfg.find_camera("0"), None);
+        assert_eq!(cfg.cam_for_scene("RightCam"), Some(CamId(2)));
+    }
+
+    #[test]
+    fn rejects_bad_camera_lists() {
+        let mut cfg = Config::default();
+        cfg.cameras.truncate(1);
+        assert!(cfg.validate().is_err(), "one camera");
+
+        let mut cfg = Config::default();
+        cfg.cameras[1].name = "left".into();
+        assert!(cfg.validate().is_err(), "duplicate name");
+
+        let mut cfg = Config::default();
+        cfg.cameras[1].scene = cfg.cameras[0].scene.clone();
+        assert!(cfg.validate().is_err(), "duplicate scene");
+
+        for bad in ["", "Left", "2", "next", "a b"] {
+            let mut cfg = Config::default();
+            cfg.cameras[0].name = bad.into();
+            assert!(cfg.validate().is_err(), "name `{bad}`");
+        }
+
+        let mut cfg = Config::default();
+        cfg.cameras[0].monitors = vec!["DISPLAY1".into()];
+        cfg.cameras[1].monitors = vec![r"\\.\DISPLAY1".into()];
+        assert!(cfg.validate().is_err(), "display on two cameras");
     }
 
     #[test]

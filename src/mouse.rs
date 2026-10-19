@@ -1,9 +1,9 @@
 //! Mouse-position detector: the monitor under the cursor selects the camera.
 //!
-//! Each camera owns zero or more displays (`[mouse] left_monitors` /
-//! `right_monitors`). A display that belongs to neither camera keeps the
-//! current camera. With exactly two displays and no configuration, the
-//! leftmost display maps to the left camera and the rightmost to the right one.
+//! Each camera owns zero or more displays (`monitors` in its `[[cameras]]`
+//! entry). A display that belongs to no camera keeps the current camera.
+//! When no camera lists any display and there are exactly as many displays
+//! as cameras, displays map to cameras in left-to-right order.
 //!
 //! The decision feeds the same switching state machine as face tracking
 //! (dwell, minimum interval, manual override), using `[mouse] dwell_ms`.
@@ -12,9 +12,9 @@ use anyhow::{Result, bail};
 use serde::Serialize;
 
 use crate::capture::SignalFault;
-use crate::config::MouseConfig;
+use crate::config::{CameraConfig, same_display};
 use crate::scoring::{Decision, HoldReason};
-use crate::{CamId, PerCam};
+use crate::{CamId, Cams};
 
 /// One display, in physical (per-monitor-DPI-aware) virtual-desktop pixels.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -49,74 +49,72 @@ impl Display {
     }
 
     fn matches(&self, pattern: &str) -> bool {
-        let p = pattern.trim();
-        self.device.eq_ignore_ascii_case(p)
-            || self
-                .device
-                .trim_start_matches(r"\\.\")
-                .eq_ignore_ascii_case(p.trim_start_matches(r"\\.\"))
+        same_display(&self.device, pattern)
     }
 }
 
-/// Which camera each display selects.
+/// Which displays select which camera: `by_cam[i]` are camera `i`'s devices.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MonitorMap {
-    pub left: Vec<String>,
-    pub right: Vec<String>,
+    pub by_cam: Vec<Vec<String>>,
 }
 
 impl MonitorMap {
-    /// Resolves the configuration against the connected displays.
-    pub fn resolve(cfg: &MouseConfig, displays: &[Display]) -> Result<Self> {
-        if cfg.left_monitors.is_empty() && cfg.right_monitors.is_empty() {
-            if displays.len() != 2 {
+    /// Resolves the cameras' `monitors` against the connected displays.
+    pub fn resolve(cameras: &[CameraConfig], displays: &[Display]) -> Result<Self> {
+        if cameras.iter().all(|c| c.monitors.is_empty()) {
+            if displays.len() != cameras.len() {
                 bail!(
-                    "{} displays connected and no monitor mapping configured; run `autocam map-monitors`",
-                    displays.len()
+                    "{} displays and {} cameras, and no camera has displays assigned; run `autocam map-monitors`",
+                    displays.len(),
+                    cameras.len()
                 );
             }
             let mut sorted: Vec<&Display> = displays.iter().collect();
             sorted.sort_by_key(|d| (d.left, d.top));
             return Ok(Self {
-                left: vec![sorted[0].device.clone()],
-                right: vec![sorted[1].device.clone()],
+                by_cam: sorted.iter().map(|d| vec![d.device.clone()]).collect(),
             });
         }
-        let pick = |patterns: &[String]| -> Vec<String> {
-            displays
-                .iter()
-                .filter(|d| patterns.iter().any(|p| d.matches(p)))
-                .map(|d| d.device.clone())
-                .collect()
-        };
         let map = Self {
-            left: pick(&cfg.left_monitors),
-            right: pick(&cfg.right_monitors),
+            by_cam: cameras
+                .iter()
+                .map(|c| {
+                    displays
+                        .iter()
+                        .filter(|d| c.monitors.iter().any(|p| d.matches(p)))
+                        .map(|d| d.device.clone())
+                        .collect()
+                })
+                .collect(),
         };
-        if let Some(both) = map.left.iter().find(|d| map.right.contains(d)) {
-            bail!("display {both} is mapped to both cameras");
+        for (i, devs) in map.by_cam.iter().enumerate() {
+            if let Some(dup) = devs
+                .iter()
+                .find(|d| map.by_cam[..i].iter().any(|o| o.contains(d)))
+            {
+                bail!("display {dup} is mapped to more than one camera");
+            }
         }
         Ok(map)
     }
 
-    /// Configured displays that are not connected (for warnings).
-    pub fn missing(cfg: &MouseConfig, displays: &[Display]) -> Vec<String> {
-        cfg.left_monitors
+    /// Configured displays that are not connected (for warnings), as
+    /// (camera name, display).
+    pub fn missing(cameras: &[CameraConfig], displays: &[Display]) -> Vec<(String, String)> {
+        cameras
             .iter()
-            .chain(&cfg.right_monitors)
-            .filter(|p| !displays.iter().any(|d| d.matches(p)))
-            .cloned()
+            .flat_map(|c| c.monitors.iter().map(move |m| (c, m)))
+            .filter(|(_, m)| !displays.iter().any(|d| d.matches(m)))
+            .map(|(c, m)| (c.name.clone(), m.clone()))
             .collect()
     }
 
     pub fn cam_for(&self, device: &str) -> Option<CamId> {
-        if self.left.iter().any(|d| d == device) {
-            Some(CamId::Left)
-        } else if self.right.iter().any(|d| d == device) {
-            Some(CamId::Right)
-        } else {
-            None
-        }
+        self.by_cam
+            .iter()
+            .position(|devs| devs.iter().any(|d| d == device))
+            .map(CamId)
     }
 }
 
@@ -135,7 +133,7 @@ pub enum CursorTarget {
 /// A camera with a capture fault (black, frozen, missing) is never selected;
 /// that and an unknown cursor are *neutral* (missing evidence), while a
 /// cursor on an unmapped display is *contrary* (stay put, restart any dwell).
-pub fn decide(target: CursorTarget, faults: &PerCam<Option<SignalFault>>) -> Decision {
+pub fn decide(target: CursorTarget, faults: &Cams<Option<SignalFault>>) -> Decision {
     match target {
         CursorTarget::Unknown => Decision::Hold {
             reason: HoldReason::CursorUnknown,
@@ -143,9 +141,11 @@ pub fn decide(target: CursorTarget, faults: &PerCam<Option<SignalFault>>) -> Dec
         CursorTarget::Unmapped => Decision::Hold {
             reason: HoldReason::UnmappedMonitor,
         },
-        CursorTarget::Camera(cam) if faults.get(cam).is_some() => Decision::Hold {
-            reason: HoldReason::TargetUnavailable,
-        },
+        CursorTarget::Camera(cam) if faults.0.get(cam.0).is_some_and(Option::is_some) => {
+            Decision::Hold {
+                reason: HoldReason::TargetUnavailable,
+            }
+        }
         CursorTarget::Camera(cam) => Decision::Prefer {
             cam,
             score: 1.0,
@@ -282,6 +282,11 @@ pub fn displays() -> Result<Vec<Display>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::MouseConfig;
+
+    const LEFT: CamId = CamId(0);
+    const LAPTOP: CamId = CamId(1);
+    const RIGHT: CamId = CamId(2);
 
     fn d(device: &str, left: i32, top: i32, w: i32, h: i32, primary: bool) -> Display {
         Display {
@@ -304,66 +309,93 @@ mod tests {
         ]
     }
 
-    fn cfg(left: &[&str], right: &[&str]) -> MouseConfig {
-        MouseConfig {
-            left_monitors: left.iter().map(|s| (*s).to_owned()).collect(),
-            right_monitors: right.iter().map(|s| (*s).to_owned()).collect(),
-            ..Default::default()
-        }
+    fn cams(spec: &[(&str, &[&str])]) -> Vec<CameraConfig> {
+        spec.iter()
+            .map(|(name, mons)| CameraConfig {
+                monitors: mons.iter().map(|s| (*s).to_owned()).collect(),
+                ..CameraConfig::named(name)
+            })
+            .collect()
     }
 
-    const OK: PerCam<Option<SignalFault>> = PerCam {
-        left: None,
-        right: None,
-    };
+    fn ok(n: usize) -> Cams<Option<SignalFault>> {
+        Cams::filled(n, None)
+    }
 
     #[test]
-    fn two_displays_auto_map_left_to_right() {
+    fn auto_map_left_to_right_when_counts_match() {
         let two = vec![
             d(r"\\.\DISPLAY1", 0, 0, 1920, 1080, true),
             d(r"\\.\DISPLAY2", -2560, 0, 2560, 1440, false),
         ];
-        let m = MonitorMap::resolve(&MouseConfig::default(), &two).unwrap();
-        assert_eq!(m.left, vec![r"\\.\DISPLAY2".to_owned()]);
-        assert_eq!(m.right, vec![r"\\.\DISPLAY1".to_owned()]);
+        let m = MonitorMap::resolve(&cams(&[("left", &[]), ("right", &[])]), &two).unwrap();
+        assert_eq!(m.cam_for(r"\\.\DISPLAY2"), Some(CamId(0)));
+        assert_eq!(m.cam_for(r"\\.\DISPLAY1"), Some(CamId(1)));
+
+        // Three cameras, three displays: left Dell, laptop, right Dell.
+        let c = cams(&[("left", &[]), ("laptop", &[]), ("right", &[])]);
+        let m = MonitorMap::resolve(&c, &rig()).unwrap();
+        assert_eq!(m.cam_for(r"\\.\DISPLAY2"), Some(LEFT));
+        assert_eq!(m.cam_for(r"\\.\DISPLAY1"), Some(LAPTOP));
+        assert_eq!(m.cam_for(r"\\.\DISPLAY3"), Some(RIGHT));
     }
 
     #[test]
-    fn three_displays_need_configuration() {
-        assert!(MonitorMap::resolve(&MouseConfig::default(), &rig()).is_err());
+    fn count_mismatch_needs_configuration() {
+        assert!(MonitorMap::resolve(&cams(&[("left", &[]), ("right", &[])]), &rig()).is_err());
     }
 
     #[test]
-    fn configured_mapping_with_unmapped_display() {
-        // Left Dell -> left camera, laptop screen -> right camera, right Dell -> keep.
-        let m = MonitorMap::resolve(&cfg(&["DISPLAY2"], &[r"\\.\DISPLAY1"]), &rig()).unwrap();
+    fn three_cameras_one_display_each() {
+        let c = cams(&[
+            ("left", &["DISPLAY2"]),
+            ("laptop", &[r"\\.\DISPLAY1"]),
+            ("right", &["display3"]),
+        ]);
+        let m = MonitorMap::resolve(&c, &rig()).unwrap();
         let displays = rig();
         let at = |x, y| target(Some((x, y)), &displays, &m).0;
-        assert_eq!(at(-1000, -900), CursorTarget::Camera(CamId::Left));
-        assert_eq!(at(500, 500), CursorTarget::Camera(CamId::Right));
-        assert_eq!(at(3000, -900), CursorTarget::Unmapped);
+        assert_eq!(at(-1000, -900), CursorTarget::Camera(LEFT));
+        assert_eq!(at(500, 500), CursorTarget::Camera(LAPTOP));
+        assert_eq!(at(3000, -900), CursorTarget::Camera(RIGHT));
         // Gap between displays (cursor cannot be there, but be safe).
         assert_eq!(at(5000, 5000), CursorTarget::Unknown);
         assert_eq!(target(None, &displays, &m).0, CursorTarget::Unknown);
     }
 
     #[test]
-    fn several_displays_per_camera() {
-        let m =
-            MonitorMap::resolve(&cfg(&["DISPLAY2"], &["DISPLAY1", "DISPLAY3"]), &rig()).unwrap();
-        assert_eq!(m.right.len(), 2);
-        assert_eq!(m.cam_for(r"\\.\DISPLAY3"), Some(CamId::Right));
+    fn unmapped_display_and_several_per_camera() {
+        // Two cameras, right Dell unmapped.
+        let c = cams(&[("left", &["DISPLAY2"]), ("right", &["DISPLAY1"])]);
+        let m = MonitorMap::resolve(&c, &rig()).unwrap();
+        let displays = rig();
+        assert_eq!(
+            target(Some((3000, -900)), &displays, &m).0,
+            CursorTarget::Unmapped
+        );
+        // Several displays for one camera.
+        let c = cams(&[
+            ("left", &["DISPLAY2"]),
+            ("right", &["DISPLAY1", "DISPLAY3"]),
+        ]);
+        let m = MonitorMap::resolve(&c, &rig()).unwrap();
+        assert_eq!(m.by_cam[1].len(), 2);
+        assert_eq!(m.cam_for(r"\\.\DISPLAY3"), Some(CamId(1)));
     }
 
     #[test]
-    fn display_on_both_cameras_is_rejected() {
-        assert!(MonitorMap::resolve(&cfg(&["DISPLAY1"], &["DISPLAY1"]), &rig()).is_err());
+    fn display_on_two_cameras_is_rejected() {
+        let c = cams(&[("left", &["DISPLAY1"]), ("right", &["DISPLAY1"])]);
+        assert!(MonitorMap::resolve(&c, &rig()).is_err());
     }
 
     #[test]
     fn missing_configured_display_is_reported() {
-        let c = cfg(&["DISPLAY2"], &["DISPLAY9"]);
-        assert_eq!(MonitorMap::missing(&c, &rig()), vec!["DISPLAY9".to_owned()]);
+        let c = cams(&[("left", &["DISPLAY2"]), ("right", &["DISPLAY9"])]);
+        assert_eq!(
+            MonitorMap::missing(&c, &rig()),
+            vec![("right".to_owned(), "DISPLAY9".to_owned())]
+        );
     }
 
     #[test]
@@ -376,15 +408,12 @@ mod tests {
     #[test]
     fn decisions() {
         assert!(matches!(
-            decide(CursorTarget::Camera(CamId::Left), &OK),
-            Decision::Prefer {
-                cam: CamId::Left,
-                ..
-            }
+            decide(CursorTarget::Camera(RIGHT), &ok(3)),
+            Decision::Prefer { cam: RIGHT, .. }
         ));
         // Never switch to a broken camera; neutral so a blip keeps the dwell.
-        let faulted = PerCam::new(Some(SignalFault::Black), None);
-        let d = decide(CursorTarget::Camera(CamId::Left), &faulted);
+        let faulted = Cams(vec![None, None, Some(SignalFault::Black)]);
+        let d = decide(CursorTarget::Camera(RIGHT), &faulted);
         assert_eq!(
             d,
             Decision::Hold {
@@ -398,39 +427,46 @@ mod tests {
     }
 
     #[test]
-    fn mouse_switching_end_to_end() {
+    fn mouse_switching_end_to_end_three_cameras() {
         use crate::switching::{Event, Mode, Switcher};
         use std::time::{Duration, Instant};
 
-        let m = MonitorMap::resolve(&cfg(&["DISPLAY2"], &["DISPLAY1"]), &rig()).unwrap();
+        let c = cams(&[
+            ("left", &["DISPLAY2"]),
+            ("laptop", &["DISPLAY1"]),
+            ("right", &["DISPLAY3"]),
+        ]);
+        let m = MonitorMap::resolve(&c, &rig()).unwrap();
         let displays = rig();
         let params = MouseConfig::default().switch_params(&Default::default());
         let mut sw = Switcher::new(params, Mode::Auto);
         let t0 = Instant::now();
         sw.handle(Event::ProgramScene {
             now: t0,
-            cam: Some(CamId::Left),
+            cam: Some(LEFT),
         });
         let tick = Duration::from_millis(100);
         let base = t0 + Duration::from_secs(5);
-        let mut run = |from: u32, n: u32, pos: (i32, i32)| -> Vec<u32> {
+        let healthy = ok(3);
+        let mut run = |from: u32, n: u32, pos: (i32, i32)| -> Vec<(u32, CamId)> {
             (from..from + n)
-                .filter(|i| {
-                    let dec = decide(target(Some(pos), &displays, &m).0, &OK);
+                .filter_map(|i| {
+                    let dec = decide(target(Some(pos), &displays, &m).0, &healthy);
                     sw.handle(Event::Tick {
-                        now: base + tick * *i,
+                        now: base + tick * i,
                         decision: dec,
                     })
-                    .is_some()
+                    .map(|cmd| (i, cmd.to))
                 })
                 .collect()
         };
         // Cursor crosses the laptop screen for 200 ms: no switch.
         assert!(run(0, 2, (500, 500)).is_empty());
         assert!(run(2, 5, (-1000, -900)).is_empty());
-        // Cursor parked on the laptop screen: switch after the 300 ms dwell.
-        assert_eq!(run(7, 10, (500, 500)), vec![10]);
-        // Right Dell (unmapped): stays on the right camera.
-        assert!(run(17, 30, (3000, -900)).is_empty());
+        // Parked on the laptop screen: switch after the 300 ms dwell.
+        assert_eq!(run(7, 10, (500, 500)), vec![(10, LAPTOP)]);
+        // Straight on to the right Dell: the dwell is met at tick 20, but the
+        // 1.5 s minimum interval since the switch at tick 10 holds it to 25.
+        assert_eq!(run(17, 20, (3000, -900)), vec![(25, RIGHT)]);
     }
 }

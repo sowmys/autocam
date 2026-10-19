@@ -7,8 +7,10 @@
   is absorbed by calibration.
 - Light your face from the front. Strong backlight (a window behind you)
   degrades face tracking.
-- Plug both cameras into separate USB ports or controllers if you can.
-  Two 1080p MJPEG streams on one hub can exceed its bandwidth.
+- AutoCam supports 2 to 9 cameras, one per monitor (several monitors can share
+  a camera).
+- Plug the cameras into separate USB ports or controllers if you can. Two or
+  three 1080p MJPEG streams on one hub can exceed its bandwidth.
 
 ## 2. Enable OBS WebSocket (with authentication)
 
@@ -62,12 +64,18 @@ Loopback traffic is not filtered by Windows Firewall, so AutoCam keeps working.
 ## 3. Create the scenes
 
 Automatic (recommended). List device names in OBS (Add Source → Video Capture
-Device), then:
+Device), then give each camera a short name and part of its device name, once
+per camera, in order (left to right is a good convention):
 
 ```powershell
-autocam obs-setup --left-device "Logitech BRIO" --right-device "Integrated Camera"
+autocam obs-setup --camera left=dell --camera laptop=integrated --camera right=logitech
 # optional: --resolution 1280x720   (default 1920x1080)
 ```
+
+Cameras are numbered in that order (1 = `left`, 2 = `laptop`, 3 = `right`);
+the numbers are what Ctrl+Alt+1/2/3 select. Names may use lowercase letters,
+digits, `-` and `_`. Re-running with a different list replaces the cameras;
+existing cameras keep their OBS names and display mapping.
 
 It sets:
 
@@ -84,42 +92,52 @@ It sets:
   centred), like OBS's *Transform → Fit to screen*. Without this, a camera
   smaller than the canvas sits in the top-left corner.
 
-The command is safe to re-run. It also creates:
+The command is safe to re-run. For each camera it creates a scene `<Name>Cam`
+holding an input `AutoCam <Name>` full-frame, plus every *other* camera as a
+**keepalive** item. With three cameras:
 
 | Scene | Contains |
 |---|---|
-| `LeftCam` | `AutoCam Left` (full frame) + `AutoCam Right` as a **keepalive** item |
-| `RightCam` | `AutoCam Right` (full frame) + `AutoCam Left` as a **keepalive** item |
+| `LeftCam` | `AutoCam Left` (full frame) + keepalives of `AutoCam Laptop`, `AutoCam Right` |
+| `LaptopCam` | `AutoCam Laptop` (full frame) + keepalives of `AutoCam Left`, `AutoCam Right` |
+| `RightCam` | `AutoCam Right` (full frame) + keepalives of `AutoCam Left`, `AutoCam Laptop` |
 
-It also sets **Deactivate when not showing = off** on both cameras. This is the
+It also sets **Deactivate when not showing = off** on every camera. This is the
 setting that matters: it keeps the camera you are *not* currently shown on
 running, so AutoCam keeps getting fresh frames from it.
 
-A **keepalive** item is the other camera at 1% scale, positioned far off the
-canvas and locked. It is never visible in the output. It keeps both cameras
+A **keepalive** item is another camera at 1% scale, positioned far off the
+canvas and locked. It is never visible in the output. It keeps every camera
 rendered on Program at all times. On the tested webcams this was not needed
 (see [DESIGN.md](DESIGN.md#feasibility-spike)). It is insurance for cameras or
 drivers that throttle hidden sources, and is safe to keep. If you remove it,
-re-run `autocam spike` to confirm both cameras stay fresh.
+re-run `autocam spike` to confirm all cameras stay fresh.
 
 Manual equivalent:
 
 1. OBS → Settings → **Video**: Base (Canvas) and Output (Scaled) Resolution
    **1920x1080**, Common FPS **30**.
-2. Create scenes `LeftCam` and `RightCam`.
-3. In `LeftCam`, add a Video Capture Device `AutoCam Left` (left camera).
-   Properties: Resolution/FPS Type **Custom**, resolution 1920x1080 (or
+2. Create one scene per camera, e.g. `LeftCam`, `LaptopCam`, `RightCam`.
+3. In each scene, add a Video Capture Device for its camera (`AutoCam Left`,
+   ...). Properties: Resolution/FPS Type **Custom**, resolution 1920x1080 (or
    1280x720), untick **Deactivate when not showing**. Then right-click it →
    Transform → **Fit to screen**.
-4. In `RightCam`, add `AutoCam Right` (right camera), same settings.
-5. In `LeftCam`, *Add Existing* `AutoCam Right`. Transform → Edit Transform:
-   position (-20000, -20000), size 1%. Lock it.
-6. In `RightCam`, do the same with `AutoCam Left`.
-7. Optional: Scene Transitions → **Cut** for instant switches, or **Fade 150–300 ms**
+4. Optional keepalives: in each scene, *Add Existing* every other camera input.
+   Transform → Edit Transform: position (-20000, -20000), size 1%. Lock it.
+5. Optional: Scene Transitions → **Cut** for instant switches, or **Fade 150–300 ms**
    for softer ones.
+6. Describe the cameras in `config.toml`, in order:
+   ```toml
+   [[cameras]]
+   name = "left"
+   source = "AutoCam Left"   # OBS input name
+   scene = "LeftCam"         # OBS scene name
 
-Names can differ. Set them in `config.toml` under `[cameras.left]` / `[cameras.right]`
-(`source` = input name, `scene` = scene name).
+   [[cameras]]
+   name = "laptop"
+   source = "AutoCam Laptop"
+   scene = "LaptopCam"
+   ```
 
 ## 4. Verify
 
@@ -134,24 +152,36 @@ autocam monitors       # lists displays as DISPLAY1, DISPLAY2, ... with size and
 autocam map-monitors   # interactive: put the mouse on each camera's display, press Enter
 ```
 
-`map-monitors` asks for the display that selects the **left** camera, then the
-**right** camera. For any further display it asks left, right, or **keep**
-(the cursor there leaves the current camera live). The result goes to
-`config.toml`:
+`map-monitors` asks, for each camera in turn, for the display that selects it.
+For any further display it asks which camera, or **keep** (the cursor there
+leaves the current camera live). Non-interactive form:
+
+```powershell
+autocam map-monitors --assign left=DISPLAY2 --assign laptop=DISPLAY1 --assign right=DISPLAY3
+# several displays for one camera: --assign right=DISPLAY3,DISPLAY4
+```
+
+The result goes into each camera's entry in `config.toml`:
 
 ```toml
 detector = "mouse"
 
+[[cameras]]
+name = "left"
+source = "AutoCam Left"
+scene = "LeftCam"
+monitors = ["DISPLAY2"]       # several allowed, e.g. ["DISPLAY2", "DISPLAY4"]
+
+# ... one [[cameras]] entry per camera ...
+
 [mouse]
-left_monitors = ["DISPLAY2"]
-right_monitors = ["DISPLAY1"]   # several allowed, e.g. ["DISPLAY1", "DISPLAY3"]
-poll_hz = 10.0                  # cursor polls per second
-dwell_ms = 300                  # cursor must stay this long before a switch
-health_check_fps = 1.0          # camera health screenshots; 0 disables
+poll_hz = 10.0                # cursor polls per second
+dwell_ms = 300                # cursor must stay this long before a switch
+health_check_fps = 1.0        # camera health screenshots; 0 disables
 ```
 
-With exactly two displays and no mapping, the leftmost display selects the
-left camera and the rightmost the right camera. Display numbers can change after
+If no camera has displays assigned and there are exactly as many displays as
+cameras, displays map to cameras left to right. Display numbers can change after
 docking or re-plugging monitors. AutoCam re-reads the layout every 5 s and logs
 a warning if a mapped display is gone; re-run `map-monitors` if the numbers
 moved. `[switching] min_switch_interval_ms` (1500) also applies in mouse mode.
@@ -166,7 +196,7 @@ autocam run
 Needs `scripts\fetch-model.ps1` and `libmediapipe.dll` (see README).
 
 ```powershell
-autocam --detector face calibrate    # face left monitor, right monitor, keyboard
+autocam --detector face calibrate    # face each camera's monitor in turn, then the keyboard
 autocam --detector face watch        # sanity check: scores follow your head
 autocam --detector face run          # or set detector = "face" in config.toml
 ```
@@ -177,7 +207,7 @@ autocam --detector face run          # or set detector = "face" in config.toml
    Program* in the virtual camera settings.
 2. Teams → Settings → **Devices** → Camera → **OBS Virtual Camera**.
 3. In a meeting, the camera menu should show the OBS output. Move the mouse to
-   the other camera's display and the picture follows within about half a
+   another camera's display and the picture follows within about half a
    second (mouse mode), or turn your head (face mode, about a second).
 
 Notes:
@@ -194,7 +224,9 @@ Notes:
 |---|---|
 | `connecting to OBS ...: authentication` | Password mismatch; check `AUTOCAM_OBS_PASSWORD` / config |
 | Status shows `stale` for a camera, or the log says `camera unavailable (Stale); will not switch to it` | Frozen frames. Try `autocam reactivate`. If it stays frozen, **restart OBS**: the Intel IPU laptop camera was seen stuck inside OBS (device open, one frozen frame) where only an OBS restart helped. Also check that *Deactivate when not showing* is off |
-| `N displays connected and no monitor mapping configured` | Run `autocam map-monitors` |
+| `… displays and … cameras, and no camera has displays assigned` | Run `autocam map-monitors` |
+| Ctrl+Alt+number types a character instead (keyboard layouts where AltGr = Ctrl+Alt) | Use Ctrl+Alt+Left / Right, the console, or set `hotkeys = false` under `[diagnostics]` |
+| OBS uses more CPU than expected | Each camera costs OBS decode time, roughly in proportion to its resolution (measured: OBS about 0.9% of the machine with two cameras at 640×480/640×360, about 4.5–6% with three at 1080p). Use `obs-setup … --resolution 1280x720` for a lighter load |
 | Mouse on a display does nothing | That display is unmapped (keeps the current camera) or its number changed: run `autocam monitors` |
 | Status shows `black` for a camera | Device not delivering video: privacy shutter, camera F-key, another app holding it. Then run `autocam reactivate` |
 | Your image fills only part of the Teams picture (e.g. the top-left quarter), or looks blurry | OBS canvas is small (640×480 on a fresh profile) or cameras are at a low default resolution. Re-run `autocam obs-setup …`; it sets 1920×1080 and fits the cameras to the frame |

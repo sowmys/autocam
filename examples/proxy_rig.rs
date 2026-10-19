@@ -21,7 +21,7 @@ async fn main() -> Result<()> {
         let client = obs.client();
         client
             .scenes()
-            .set_current_program_scene(cfg.cameras.left.scene.as_str())
+            .set_current_program_scene(cfg.cameras[0].scene.as_str())
             .await
             .ok();
         for scene in [
@@ -43,10 +43,18 @@ async fn main() -> Result<()> {
     let keepalive = rest.first().is_none_or(|k| k == "keepalive");
 
     let mut cfg = Config::load(&Config::default_path())?;
-    cfg.cameras.left.scene = "Proxy LeftCam".into();
-    cfg.cameras.left.source = "Proxy Left".into();
-    cfg.cameras.right.scene = "Proxy RightCam".into();
-    cfg.cameras.right.source = "Proxy Right".into();
+    cfg.cameras = vec![
+        autocam::config::CameraConfig {
+            scene: "Proxy LeftCam".into(),
+            source: "Proxy Left".into(),
+            ..autocam::config::CameraConfig::named("left")
+        },
+        autocam::config::CameraConfig {
+            scene: "Proxy RightCam".into(),
+            source: "Proxy Right".into(),
+            ..autocam::config::CameraConfig::named("right")
+        },
+    ];
 
     let obs = Obs::connect(&cfg.obs).await?;
     let client = obs.client();

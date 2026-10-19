@@ -172,7 +172,7 @@ mod tests {
     fn frame(fill: u8, noise_seed: u8) -> Frame {
         let mut rgb = vec![fill; 64 * 36 * 3];
         rgb[0] = noise_seed;
-        Frame::from_rgb(CamId::Left, 64, 36, rgb, Instant::now())
+        Frame::from_rgb(CamId(0), 64, 36, rgb, Instant::now())
     }
 
     #[test]
@@ -205,9 +205,9 @@ mod tests {
             "data:image/png;base64,{}",
             base64::engine::general_purpose::STANDARD.encode(&png)
         );
-        let f = decode_data_uri(CamId::Right, &uri, Instant::now()).unwrap();
+        let f = decode_data_uri(CamId(1), &uri, Instant::now()).unwrap();
         assert_eq!((f.width, f.height, f.rgb.len()), (8, 4, 8 * 4 * 3));
-        assert!(decode_data_uri(CamId::Right, "garbage", Instant::now()).is_err());
+        assert!(decode_data_uri(CamId(1), "garbage", Instant::now()).is_err());
     }
 
     #[test]

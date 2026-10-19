@@ -5,14 +5,26 @@ or hold for a reason). Everything after that is shared: the switching state
 machine, OBS transport, controls and diagnostics. `detector = "mouse"` is the
 default. `"face"` is kept for later.
 
+## Cameras
+
+AutoCam handles 2 to 9 cameras (`MAX_CAMERAS`), configured as an ordered
+`[[cameras]]` list. Each entry has a `name`, an OBS input (`source`), an OBS
+scene, and, for mouse mode, its `monitors`. In code a camera is a `CamId`, an
+index into that list; per-camera data lives in `Cams<T>`, a `Vec` indexed by
+`CamId`. Numbers shown to the user are 1-based (Ctrl+Alt+1 is `CamId(0)`).
+Config files from the two-camera era (`[cameras.left]` / `[cameras.right]`
+plus `[mouse] left_monitors` / `right_monitors`) are migrated on load. Nothing
+in the switching state machine depends on the camera count: it only compares
+the preferred camera with the current one.
+
 ## Mouse pipeline (default)
 
 ```
 every 100 ms (mouse.poll_hz = 10)
  ├─ mouse.rs      GetCursorPos → display under the cursor (per-monitor-DPI-aware,
- │                physical pixels) → camera via [mouse] left_monitors / right_monitors
- │                cursor on own camera / unmapped display / unknown → Decision
- ├─ every 1 s     camera health: GetSourceScreenshot both cameras → black/stale → fault
+ │                physical pixels) → camera via each camera's `monitors`
+ │                cursor on a camera's display / unmapped display / unknown → Decision
+ ├─ every 1 s     camera health: GetSourceScreenshot every camera → black/stale → fault
  │                (a faulted camera is never selected)
  ├─ switching.rs  dwell = mouse.dwell_ms (300), min_votes = 1, min interval 1500 ms
  └─ obs.rs        SetCurrentProgramScene(LeftCam | RightCam)
@@ -21,14 +33,16 @@ every 100 ms (mouse.poll_hz = 10)
 | Cursor | Verdict | Effect on the dwell |
 |---|---|---|
 | on a display of the current camera | Prefer(current) | contrary: resets |
-| on a display of the other camera, camera healthy | Prefer(other) | accumulates; switch after 300 ms |
-| on a display of the other camera, camera faulted | Hold(TargetUnavailable) | neutral: never switches |
+| on a display of another camera, camera healthy | Prefer(that camera) | accumulates; switch after 300 ms |
+| on a display of another camera, camera faulted | Hold(TargetUnavailable) | neutral: never switches |
 | on an unmapped display | Hold(UnmappedMonitor) | contrary: keep current camera |
 | position unavailable (lock screen, UAC prompt) | Hold(CursorUnknown) | neutral |
 
 The display layout is re-read every 5 s, so docking and unplugging are
 followed. With exactly two displays and no mapping, leftmost → left camera and
-rightmost → right camera. Otherwise `autocam map-monitors` writes the mapping.
+rightmost → right camera, generally: when no camera has displays assigned and
+the display count equals the camera count, displays map to cameras left to
+right. Otherwise `autocam map-monitors` writes the mapping.
 The process declares per-monitor-v2 DPI awareness at startup, so cursor and
 display rectangles share one physical coordinate space on mixed-DPI setups.
 
@@ -73,14 +87,17 @@ faces.
 
 ## Calibration and scores
 
-For each camera *c*, `autocam calibrate` records the median pose it observes
-while the user faces *c*'s monitor (**target**) and while facing the other
-monitor (**away**, if the face is still visible). It also records the pose while
+`autocam calibrate` has one step per camera: the user faces that camera's
+monitor while **every** camera is sampled. For each camera *c* that gives the
+median pose *c* observes while the user faces *c*'s monitor (**target**) and
+while facing each other monitor. The nearest of those other poses (**away**,
+if the face is still visible) sets the width, because it is the monitor
+hardest to tell apart from *c*'s own. A last step records the pose while
 looking down.
 
 ```
 score_c = exp(-½ [ (Δyaw/σ_yaw)² + (Δpitch/σ_pitch)² ])      Δ = pose − target_c
-σ_yaw   = clamp(|target − away| / 3, 4°, 20°), at least 2.5 × measured noise
+σ_yaw   = clamp(|target − nearest away| / 3, 4°, 20°), at least 2.5 × measured noise
 σ_pitch = clamp(1.25 σ_yaw, 6°, 25°)
 looking_down ⇔ Δpitch < 0.6 × (down − target).pitch   (clamped to −30…−6°)
 ```
@@ -99,8 +116,8 @@ warns below 12°, and when the predicted margin is below the configured one.
 | no camera sees a face | Hold(NoFace), *neutral* |
 | any visible face is looking down | Hold(LookingDown), *contrary* |
 | best score < `min_score` (0.45), one camera without face | Hold(TrackingLost), *neutral* |
-| best score < `min_score`, both cameras see the face | Hold(LowScore), *contrary* |
-| best − other < `confidence_margin` (0.25) | Hold(Ambiguous), *contrary* |
+| best score < `min_score`, every camera sees the face | Hold(LowScore), *contrary* |
+| best − runner-up < `confidence_margin` (0.25) | Hold(Ambiguous), *contrary* |
 | otherwise | Prefer(best) |
 
 A faulted camera (capture failed, black, stale) contributes no score and can
@@ -148,8 +165,8 @@ problems in `/status`.
 **Question:** Can `GetSourceScreenshot` sample both webcams at 4 FPS with fresh
 frames, including the camera whose scene is *not* on Program?
 
-**Method** (`autocam spike`): sample both cameras at 4 FPS for 60 s while
-rotating Program between LeftCam and RightCam (and optionally an empty scene)
+**Method** (`autocam spike`): sample every camera at 4 FPS for 60 s while
+rotating Program through every camera's scene (and optionally an empty scene)
 every 3 s. Classify every sample per camera as *own scene on Program* or *other
 camera's scene on Program*. Count byte-identical consecutive frames; live sensors
 never repeat exactly. Pass: ≥ 99% success, ≥ 95% fresh, p95 latency ≤ 150 ms
@@ -217,10 +234,10 @@ feed, and AutoCam becomes a critical part of the video path.
 
 ## Known limitations
 
-- Head pose, not eye gaze: glancing at the other monitor with your eyes only
+- Head pose, not eye gaze: glancing at another monitor with your eyes only
   will not switch, by design.
-- Two cameras exactly. With *N* cameras the decision generalizes to argmax with
-  a margin over the runner-up, but the config and calibration UI do not.
+- At most 9 cameras (hotkeys Ctrl+Alt+1…9). Face mode with several cameras is
+  unit-tested and simulated, not yet verified live.
 - Calibration assumes the user's position is roughly constant. Re-calibrate
   after moving the chair or monitors substantially.
 - OBS's default 300 ms Fade transition is visible on every switch. Choose *Cut*

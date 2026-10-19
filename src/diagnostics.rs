@@ -17,11 +17,11 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::config::DetectorKind;
-use crate::control::Control;
+use crate::control::{CamRef, Control};
 use crate::face::HeadPose;
 use crate::scoring::{CamSignal, Decision};
 use crate::switching::{Mode, SwitchCause};
-use crate::{CamId, PerCam};
+use crate::{CamId, Cams};
 
 // ---------------------------------------------------------------------------
 // Latency statistics
@@ -208,6 +208,8 @@ impl EvalTracker {
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct CamStatus {
+    /// Camera name from the config.
+    pub name: String,
     pub signal: Option<CamSignal>,
     pub pose: Option<HeadPose>,
     pub frames: u64,
@@ -257,7 +259,8 @@ pub struct Status {
     pub pending: Option<CamId>,
     pub calibrated: bool,
     pub decision: Option<Decision>,
-    pub cams: PerCam<CamStatus>,
+    /// One entry per camera, in camera order (`current`/`pending` index it).
+    pub cams: Cams<CamStatus>,
     pub ticks: u64,
     pub tick_ms: Samples,
     pub switches: SwitchStats,
@@ -274,17 +277,22 @@ pub fn lock(s: &SharedStatus) -> std::sync::MutexGuard<'_, Status> {
 }
 
 impl Status {
+    /// Camera name for a `current`/`pending` index.
+    pub fn cam_name(&self, cam: CamId) -> &str {
+        self.cams.0.get(cam.0).map_or("?", |s| s.name.as_str())
+    }
+
     pub fn one_line(&self) -> String {
         let mouse = self.detector == DetectorKind::Mouse;
-        let cam = |c: CamId| {
-            let s = self.cams.get(c);
+        let cam = |s: &CamStatus| {
+            let name = &s.name;
             if mouse {
                 let health = match s.signal {
                     Some(CamSignal::Fault { fault }) => format!("{fault:?}").to_lowercase(),
                     Some(_) => "ok".into(),
                     None => "-".into(),
                 };
-                return format!("{c}={health}");
+                return format!("{name}={health}");
             }
             let face_rate = if s.frames == 0 {
                 0.0
@@ -297,8 +305,9 @@ impl Status {
                 Some(CamSignal::Fault { fault }) => format!("{fault:?}").to_lowercase(),
                 None => "-".into(),
             };
-            format!("{c}={score} face={face_rate:.0}%")
+            format!("{name}={score} face={face_rate:.0}%")
         };
+        let cams: Vec<String> = self.cams.0.iter().map(cam).collect();
         let cursor = if mouse {
             format!(
                 " cursor={}",
@@ -310,11 +319,10 @@ impl Status {
             String::new()
         };
         format!(
-            "mode={:?} cur={}{cursor} {} {} switches={}a/{}m rev={} cpu={:.1}% ({:.0}% core) rss={:.0}MB obs_cpu={} tick_p95={}",
+            "mode={:?} cur={}{cursor} {} switches={}a/{}m rev={} cpu={:.1}% ({:.0}% core) rss={:.0}MB obs_cpu={} tick_p95={}",
             self.mode,
-            self.current.map_or("-", CamId::name),
-            cam(CamId::Left),
-            cam(CamId::Right),
+            self.current.map_or("-", |c| self.cam_name(c)),
+            cams.join(" "),
             self.switches.auto,
             self.switches.manual,
             self.switches.reversals,
@@ -485,15 +493,19 @@ pub fn route(request_head: &str, port: u16) -> Result<Route, HttpReject> {
                 return Err(HttpReject::Forbidden);
             }
             let c = match path {
-                "/select/left" => Control::Select(CamId::Left),
-                "/select/right" => Control::Select(CamId::Right),
                 "/mode/auto" => Control::SetMode(Mode::Auto),
                 "/mode/manual" => Control::SetMode(Mode::Manual),
                 "/mode/toggle" => Control::ToggleMode,
-                "/label/left" => Control::Label(Some(CamId::Left)),
-                "/label/right" => Control::Label(Some(CamId::Right)),
                 "/label/none" => Control::Label(None),
-                _ => return Err(HttpReject::NotFound),
+                p => {
+                    if let Some(key) = p.strip_prefix("/select/") {
+                        Control::Select(CamRef::parse(key).ok_or(HttpReject::NotFound)?)
+                    } else if let Some(key) = p.strip_prefix("/label/") {
+                        Control::Label(Some(CamRef::parse(key).ok_or(HttpReject::NotFound)?))
+                    } else {
+                        return Err(HttpReject::NotFound);
+                    }
+                }
             };
             Ok(Route::Control(c))
         }
@@ -578,7 +590,7 @@ mod tests {
         );
         assert_eq!(
             route(&req("POST", "/select/left", "localhost:8787", true), 8787),
-            Ok(Route::Control(Control::Select(CamId::Left)))
+            Ok(Route::Control(Control::Select(CamRef::Key("left".into()))))
         );
         // DNS rebinding: attacker-controlled host name.
         assert_eq!(
@@ -602,6 +614,31 @@ mod tests {
     }
 
     #[test]
+    fn camera_routes() {
+        let post = |p: &str| route(&req("POST", p, "127.0.0.1:8787", true), 8787);
+        assert_eq!(
+            post("/select/3"),
+            Ok(Route::Control(Control::Select(CamRef::Key("3".into()))))
+        );
+        assert_eq!(
+            post("/select/next"),
+            Ok(Route::Control(Control::Select(CamRef::Next)))
+        );
+        assert_eq!(
+            post("/label/laptop"),
+            Ok(Route::Control(Control::Label(Some(CamRef::Key(
+                "laptop".into()
+            )))))
+        );
+        assert_eq!(
+            post("/label/none"),
+            Ok(Route::Control(Control::Label(None)))
+        );
+        assert_eq!(post("/select/"), Err(HttpReject::NotFound));
+        assert_eq!(post("/select/a%20b"), Err(HttpReject::NotFound));
+    }
+
+    #[test]
     fn samples_summary() {
         let mut s = Samples::with_capacity(3);
         assert!(s.summary().is_none());
@@ -620,24 +657,24 @@ mod tests {
         let ms = |m: u64| t0 + Duration::from_millis(m);
         let mut e = EvalTracker::new(Duration::from_secs(5));
 
-        e.on_label(ms(0), Some(CamId::Left), Some(CamId::Left));
-        e.on_label(ms(1000), Some(CamId::Right), Some(CamId::Left));
-        e.on_switch(ms(2100), CamId::Right, SwitchCause::Auto);
+        e.on_label(ms(0), Some(CamId(0)), Some(CamId(0)));
+        e.on_label(ms(1000), Some(CamId(1)), Some(CamId(0)));
+        e.on_switch(ms(2100), CamId(1), SwitchCause::Auto);
         assert_eq!(e.stats.correct_switches, 1);
         let lat = e.stats.latency_ms.summary().unwrap();
         assert!((lat.p50 - 1100.0).abs() < 1.0);
 
         // Looking at the keyboard: any auto switch is false.
-        e.on_label(ms(3000), None, Some(CamId::Right));
-        e.on_switch(ms(4000), CamId::Left, SwitchCause::Auto);
+        e.on_label(ms(3000), None, Some(CamId(1)));
+        e.on_switch(ms(4000), CamId(0), SwitchCause::Auto);
         assert_eq!(e.stats.false_switches, 1);
 
         // Manual switches are never counted as false.
-        e.on_switch(ms(4100), CamId::Right, SwitchCause::Manual);
+        e.on_switch(ms(4100), CamId(1), SwitchCause::Manual);
         assert_eq!(e.stats.false_switches, 1);
 
         // Label moves, no switch within the timeout: missed.
-        e.on_label(ms(5000), Some(CamId::Left), Some(CamId::Right));
+        e.on_label(ms(5000), Some(CamId(0)), Some(CamId(1)));
         e.on_tick(ms(9000));
         assert_eq!(e.stats.missed_switches, 0);
         e.on_tick(ms(10_500));

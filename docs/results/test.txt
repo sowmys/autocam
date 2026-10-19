@@ -1,55 +1,65 @@
 cargo test --release  ->  exit 0
    Compiling autocam v0.1.0 (<repo>)
-    Finished `release` profile [optimized + debuginfo] target(s) in 2m 51s
-     Running unittests src\lib.rs (target\release\deps\autocam-b1c4ebdee17e7f4a.exe)
+    Finished `release` profile [optimized + debuginfo] target(s) in 3m 50s
+     Running unittests src\lib.rs (target\release\deps\autocam-a77d0f6541ea88a5.exe)
 
-running 62 tests
-test capture::tests::debug_never_prints_pixels ... ok
-test capture::tests::black_frame_is_fault ... ok
+running 73 tests
 test capture::tests::diff_detects_change ... ok
+test config::tests::rejects_non_loopback_endpoints ... ok
+test capture::tests::debug_never_prints_pixels ... ok
+test capture::tests::decodes_png_data_uri ... ok
 test capture::tests::identical_frames_become_stale ... ok
+test config::tests::defaults_validate_and_roundtrip ... ok
 test config::tests::debug_redacts_password ... ok
 test config::tests::partial_file_fills_defaults ... ok
-test capture::tests::decodes_png_data_uri ... ok
-test config::tests::rejects_non_loopback_endpoints ... ok
-test config::tests::defaults_validate_and_roundtrip ... ok
+test capture::tests::black_frame_is_fault ... ok
+test config::tests::rejects_bad_camera_lists ... ok
+test config::tests::three_cameras_and_lookup ... ok
 test control::tests::console_commands ... ok
-test diagnostics::tests::eval_counts_latency_false_and_missed ... ok
+test control::tests::hotkeys_for_three_cameras ... ok
+test diagnostics::tests::camera_routes ... ok
+test config::tests::migrates_two_camera_config ... ok
 test diagnostics::tests::routes_and_hardening ... ok
+test diagnostics::tests::eval_counts_latency_false_and_missed ... ok
 test diagnostics::tests::samples_summary ... ok
-test face::tests::landmarks_recover_yaw_and_pitch ... ok
 test face::tests::landmarks_frontal_is_zero ... ok
+test face::tests::landmarks_recover_yaw_and_pitch ... ok
 test face::tests::off_centre_face_looking_at_camera_is_frontal ... ok
 test face::tests::relative_pose_subtracts_camera_direction ... ok
 test face::tests::too_few_landmarks_is_none ... ok
 test face::tests::wrap_keeps_range ... ok
+test mouse::tests::auto_map_left_to_right_when_counts_match ... ok
+test mouse::tests::count_mismatch_needs_configuration ... ok
 test mouse::tests::decisions ... ok
-test mouse::tests::configured_mapping_with_unmapped_display ... ok
-test mouse::tests::display_on_both_cameras_is_rejected ... ok
+test mouse::tests::display_on_two_cameras_is_rejected ... ok
 test mouse::tests::edges_are_half_open ... ok
 test mouse::tests::missing_configured_display_is_reported ... ok
-test mouse::tests::mouse_switching_end_to_end ... ok
-test mouse::tests::several_displays_per_camera ... ok
-test mouse::tests::three_displays_need_configuration ... ok
-test mouse::tests::two_displays_auto_map_left_to_right ... ok
+test mouse::tests::mouse_switching_end_to_end_three_cameras ... ok
+test mouse::tests::three_cameras_one_display_each ... ok
+test mouse::tests::unmapped_display_and_several_per_camera ... ok
+test obs::tests::parses_resolutions ... ok
+test obs::tests::picks_exact_then_widescreen_then_largest ... ok
 test scoring::tests::calibrated_scores_drive_correct_decisions ... ok
 test scoring::tests::calibration_handles_face_lost_when_looking_away ... ok
 test scoring::tests::calibration_maps_angled_cameras ... ok
 test scoring::tests::calibration_rejects_missing_face ... ok
 test scoring::tests::calibration_rejects_no_separation ... ok
+test scoring::tests::calibration_rejects_wrong_phase_count ... ok
+test scoring::tests::calibration_three_cameras_uses_nearest_monitor ... ok
 test scoring::tests::calibration_warns_on_weak_separation ... ok
 test scoring::tests::decide_holds_when_ambiguous ... ok
 test scoring::tests::decide_holds_when_both_low ... ok
-test scoring::tests::decide_holds_when_looking_down_even_if_one_is_frontal ... ok
 test scoring::tests::calibration_roundtrips_through_toml ... ok
+test scoring::tests::decide_holds_when_looking_down_even_if_one_is_frontal ... ok
 test scoring::tests::decide_no_face_and_faults ... ok
 test scoring::tests::decide_one_camera_disconnected_other_frontal ... ok
 test scoring::tests::decide_prefers_clear_winner ... ok
+test scoring::tests::decide_three_cameras_uses_runner_up ... ok
 test scoring::tests::score_peaks_at_target_and_falls_off ... ok
 test switching::tests::back_to_auto_needs_fresh_dwell ... ok
 test switching::tests::contrary_evidence_restarts_dwell ... ok
-test simulate::tests::rng_is_deterministic_and_roughly_normal ... ok
 test switching::tests::exact_dwell_boundary ... ok
+test simulate::tests::rng_is_deterministic_and_roughly_normal ... ok
 test switching::tests::external_program_change_is_adopted ... ok
 test switching::tests::holds_never_switch ... ok
 test switching::tests::long_tracking_dropout_resets_dwell ... ok
@@ -65,11 +75,12 @@ test switching::tests::switches_after_dwell_not_before ... ok
 test switching::tests::unknown_program_scene_then_first_choice ... ok
 test simulate::tests::noisy_disconnected_like_signals_do_not_flap ... ok
 test simulate::tests::simulated_session_meets_targets ... ok
+test simulate::tests::three_camera_session_meets_targets ... ok
 test config::tests::save_and_load ... ok
 
-test result: ok. 62 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+test result: ok. 73 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
 
-     Running unittests src\main.rs (target\release\deps\autocam-b685ea3ac23e5772.exe)
+     Running unittests src\main.rs (target\release\deps\autocam-f6f699db93e17ed4.exe)
 
 running 0 tests
 

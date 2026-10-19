@@ -19,7 +19,7 @@ use tracing::{info, warn};
 
 use crate::CamId;
 use crate::capture::{CaptureError, Frame, decode_data_uri};
-use crate::config::{CaptureConfig, Config, ObsConfig};
+use crate::config::{CameraConfig, CaptureConfig, Config, ObsConfig};
 
 pub struct Obs {
     client: Client,
@@ -134,15 +134,17 @@ impl Obs {
         let scenes = self.scene_names().await?;
         let inputs = self.input_names().await?;
         let mut problems = Vec::new();
-        for cam in CamId::ALL {
-            let c = cfg.camera(cam);
+        for c in &cfg.cameras {
             if !scenes.contains(&c.scene) {
-                problems.push(format!("{cam}: scene `{}` not found in OBS", c.scene));
+                problems.push(format!(
+                    "camera `{}`: scene `{}` not found in OBS",
+                    c.name, c.scene
+                ));
             }
             if !inputs.contains(&c.source) && !scenes.contains(&c.source) {
                 problems.push(format!(
-                    "{cam}: source `{}` not found in OBS (inputs or scenes)",
-                    c.source
+                    "camera `{}`: source `{}` not found in OBS (inputs or scenes)",
+                    c.name, c.source
                 ));
             }
         }
@@ -169,125 +171,135 @@ impl Obs {
             .collect())
     }
 
-    /// Creates (or updates) the LeftCam/RightCam scenes and camera inputs.
+    /// Creates (or updates) one scene and one camera input per camera.
     ///
-    /// `left_device`/`right_device` are substrings matched against OBS's
-    /// device names. Without a right device, the right scene re-uses the left
-    /// camera input so the pipeline can be exercised with one physical camera.
+    /// `assignments` are `(camera name, device)` in camera order; the device
+    /// is a substring matched against OBS's device names. The camera list in
+    /// `cfg` is replaced by these cameras: existing cameras keep their OBS
+    /// names and display mapping, new ones get `AutoCam <Name>` / `<Name>Cam`.
+    /// Then sets the canvas and camera resolution, fits the cameras to the
+    /// frame, and adds the keepalive items.
     pub async fn setup_scenes(
         &self,
         cfg: &mut Config,
-        left_device: &str,
-        right_device: Option<&str>,
+        assignments: &[(String, String)],
         resolution: (u32, u32),
     ) -> Result<()> {
-        let scenes = self.scene_names().await?;
-        let inputs = self.input_names().await?;
-        let simulate_second = right_device.is_none();
+        if assignments.len() < 2 {
+            bail!("give at least two cameras, e.g. --camera left=dell --camera right=logitech");
+        }
+        cfg.cameras = assignments
+            .iter()
+            .map(|(name, _)| {
+                cfg.cameras
+                    .iter()
+                    .find(|c| c.name.eq_ignore_ascii_case(name))
+                    .cloned()
+                    .unwrap_or_else(|| CameraConfig::named(&name.to_ascii_lowercase()))
+            })
+            .collect();
+        cfg.validate()?;
 
-        for cam in CamId::ALL {
-            let scene = cfg.camera(cam).scene.clone();
-            if !scenes.contains(&scene) {
-                self.client.scenes().create(&scene).await?;
-                info!("created scene `{scene}`");
+        let scenes = self.scene_names().await?;
+        for c in &cfg.cameras {
+            if !scenes.contains(&c.scene) {
+                self.client.scenes().create(&c.scene).await?;
+                info!("created scene `{}`", c.scene);
             }
         }
 
-        // The left camera input always exists; create it in the left scene.
-        let left = cfg.cameras.left.clone();
-        if !inputs.contains(&left.source) {
-            self.create_camera_input(&left.scene, &left.source).await?;
+        // Any camera input can list the devices; make sure the first exists.
+        let mut inputs = self.input_names().await?;
+        let first = cfg.cameras[0].clone();
+        if !inputs.contains(&first.source) {
+            self.create_camera_input(&first.scene, &first.source)
+                .await?;
+            inputs.push(first.source.clone());
         }
-        let devices = self.list_video_devices(&left.source).await?;
+        let devices = self.list_video_devices(&first.source).await?;
         if devices.is_empty() {
             bail!("OBS reports no video capture devices");
         }
-        let pick = |want: &str| -> Result<(String, String)> {
+        let available = || {
             devices
                 .iter()
-                .find(|(name, _)| name.to_lowercase().contains(&want.to_lowercase()))
+                .map(|(n, _)| n.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let mut picked: Vec<(String, String)> = Vec::new();
+        for (name, want) in assignments {
+            let (dname, id) = devices
+                .iter()
+                .find(|(n, _)| n.to_lowercase().contains(&want.to_lowercase()))
                 .cloned()
                 .ok_or_else(|| {
                     anyhow!(
-                        "no video device matching `{want}`; available: {}",
-                        devices
-                            .iter()
-                            .map(|(n, _)| n.as_str())
-                            .collect::<Vec<_>>()
-                            .join(", ")
+                        "camera `{name}`: no video device matching `{want}`; available: {}",
+                        available()
                     )
-                })
-        };
-        let (lname, lid) = pick(left_device)?;
-        self.configure_camera(&left.source, &lid).await?;
-        info!("`{}` -> {lname}", left.source);
-
-        if simulate_second {
-            // Same physical camera shown in the right scene.
-            let right_scene = cfg.cameras.right.scene.clone();
-            let items = self
-                .client
-                .scene_items()
-                .list(right_scene.as_str().into())
-                .await?;
-            if !items.iter().any(|i| i.source_name == left.source) {
-                let id = self
-                    .client
-                    .scene_items()
-                    .create(CreateSceneItem {
-                        scene: right_scene.as_str().into(),
-                        source: SourceId::Name(&left.source),
-                        enabled: Some(true),
-                    })
-                    .await?;
-                info!("added `{}` to `{right_scene}` (item {id})", left.source);
+                })?;
+            if let Some((other, _)) = picked.iter().find(|(_, i)| *i == id) {
+                bail!(
+                    "cameras `{other}` and `{name}` both matched `{dname}`; use a more specific name"
+                );
             }
-            cfg.cameras.right.source = left.source.clone();
-            warn!(
-                "simulation: both cameras sample `{}`; calibration targets alone tell them apart",
-                left.source
-            );
-        } else {
-            if cfg.cameras.right.source == left.source {
-                // Leaving simulation mode: the right camera gets its own input.
-                cfg.cameras.right.source = Config::default().cameras.right.source;
-            }
-            let right = cfg.cameras.right.clone();
-            if !inputs.contains(&right.source) {
-                self.create_camera_input(&right.scene, &right.source)
-                    .await?;
-            }
-            let (rname, rid) = pick(right_device.unwrap_or_default())?;
-            if rid == lid {
-                bail!("left and right must be different devices (both matched `{rname}`)");
-            }
-            self.configure_camera(&right.source, &rid).await?;
-            info!("`{}` -> {rname}", right.source);
+            picked.push((name.clone(), id));
         }
-        let mut inputs_done: Vec<String> = Vec::new();
-        for cam in CamId::ALL {
-            let source = cfg.camera(cam).source.clone();
-            if inputs_done.contains(&source) {
-                continue;
+
+        for (c, (_, id)) in cfg.cameras.clone().iter().zip(&picked) {
+            if !inputs.contains(&c.source) {
+                self.create_camera_input(&c.scene, &c.source).await?;
+                inputs.push(c.source.clone());
+            } else {
+                self.ensure_in_scene(&c.source, &c.scene).await?;
             }
-            match self.set_camera_resolution(&source, resolution).await {
-                Ok(r) => info!("`{source}` resolution {r}"),
+            self.configure_camera(&c.source, id).await?;
+            let dname = devices
+                .iter()
+                .find(|(_, i)| i == id)
+                .map_or("?", |(n, _)| n);
+            info!("camera `{}`: `{}` -> {dname}", c.name, c.source);
+        }
+
+        for c in &cfg.cameras {
+            match self.set_camera_resolution(&c.source, resolution).await {
+                Ok(r) => info!("`{}` resolution {r}", c.source),
                 Err(e) => {
-                    warn!("could not set `{source}` resolution ({e:#}); keeping device default")
+                    warn!(
+                        "could not set `{}` resolution ({e:#}); keeping device default",
+                        c.source
+                    )
                 }
             }
-            inputs_done.push(source);
         }
         self.set_canvas(resolution.0, resolution.1).await?;
         // Let OBS re-open the cameras at the new resolution before fitting.
         tokio::time::sleep(Duration::from_millis(1500)).await;
         self.fit_cameras_to_canvas(cfg).await?;
         for a in self.ensure_keepalive(cfg).await? {
-            info!("keepalive: added {a} (tiny, off-canvas, locked)");
+            info!("keepalive: {a} (tiny, off-canvas, locked)");
         }
         Ok(())
     }
 
+    /// Adds an existing input to a scene if it is not already there.
+    async fn ensure_in_scene(&self, source: &str, scene: &str) -> Result<()> {
+        let items = self.client.scene_items().list(scene.into()).await?;
+        if !items.iter().any(|i| i.source_name == source) {
+            self.client
+                .scene_items()
+                .create(CreateSceneItem {
+                    scene: scene.into(),
+                    source: SourceId::Name(source),
+                    enabled: Some(true),
+                })
+                .await
+                .with_context(|| format!("adding `{source}` to `{scene}`"))?;
+            info!("added `{source}` to `{scene}`");
+        }
+        Ok(())
+    }
     /// Sets OBS's canvas and output resolution (30 fps). OBS refuses this
     /// while an output is active, so the Virtual Camera is stopped and
     /// restarted around the change (a one-second blip in Teams).
@@ -387,8 +399,7 @@ impl Obs {
             video.fps_numerator,
             video.fps_denominator
         );
-        for cam in CamId::ALL {
-            let c = cfg.camera(cam);
+        for c in &cfg.cameras {
             let items = self
                 .client
                 .scene_items()
@@ -480,9 +491,10 @@ impl Obs {
             .with_context(|| format!("configuring `{input}`"))
     }
 
-    /// Makes sure each camera source is also rendered while the *other*
-    /// camera's scene is on Program, by adding it to that scene as a tiny,
-    /// locked item far off the canvas (never visible in the output).
+    /// Makes sure each camera source is also rendered while *another*
+    /// camera's scene is on Program, by adding it to every other camera's
+    /// scene as a tiny, locked item far off the canvas (never visible in the
+    /// output).
     ///
     /// Insurance, not a requirement: with real webcams (Dell WB7022, Intel
     /// IPU) and "Deactivate when not showing" off, the spike measured fresh
@@ -494,13 +506,7 @@ impl Obs {
             Position, Scale, SceneItemTransform, SetLocked, SetTransform,
         };
         let mut added = Vec::new();
-        if cfg.cameras.left.source == cfg.cameras.right.source {
-            // Simulation mode: the shared input is each scene's main view.
-            return Ok(added);
-        }
-        for cam in CamId::ALL {
-            let source = cfg.camera(cam).source.clone();
-            let scene = cfg.camera(cam.other()).scene.clone();
+        for (source, scene) in keepalive_pairs(cfg) {
             let items = self
                 .client
                 .scene_items()
@@ -556,15 +562,11 @@ impl Obs {
     /// Returns how many items were changed.
     pub async fn set_keepalive_enabled(&self, cfg: &Config, enabled: bool) -> Result<usize> {
         use obws::requests::scene_items::SetEnabled;
-        if cfg.cameras.left.source == cfg.cameras.right.source {
-            return Ok(0);
-        }
         let mut n = 0;
-        for cam in CamId::ALL {
-            let source = &cfg.camera(cam).source;
-            let scene = cfg.camera(cam.other()).scene.as_str();
+        for (source, scene) in keepalive_pairs(cfg) {
+            let scene = scene.as_str();
             for item in self.client.scene_items().list(scene.into()).await? {
-                if &item.source_name == source {
+                if item.source_name == source {
                     self.client
                         .scene_items()
                         .set_enabled(SetEnabled {
@@ -580,18 +582,17 @@ impl Obs {
         Ok(n)
     }
 
-    /// True if every camera source is present (enabled) in both camera scenes.
+    /// True if every camera source is present (enabled) in every other
+    /// camera's scene.
     pub async fn keepalive_ok(&self, cfg: &Config) -> Result<bool> {
-        for cam in CamId::ALL {
-            let source = &cfg.camera(cam).source;
-            let scene = &cfg.camera(cam.other()).scene;
+        for (source, scene) in keepalive_pairs(cfg) {
             let items = self
                 .client
                 .scene_items()
                 .list(scene.as_str().into())
                 .await?;
             let mut found = false;
-            for item in items.iter().filter(|i| &i.source_name == source) {
+            for item in items.iter().filter(|i| i.source_name == source) {
                 if self
                     .client
                     .scene_items()
@@ -665,6 +666,20 @@ pub fn pick_resolution(modes: &[(u32, u32)], want: (u32, u32)) -> Option<(u32, u
         .or_else(|| modes.iter().filter(fits).max_by_key(|m| area(m)))
         .or_else(|| modes.iter().min_by_key(|m| area(m)))
         .copied()
+}
+
+/// (camera source, other camera's scene) for every ordered pair of cameras:
+/// where each keepalive item lives.
+pub fn keepalive_pairs(cfg: &Config) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    for c in &cfg.cameras {
+        for o in &cfg.cameras {
+            if o.scene != c.scene {
+                pairs.push((c.source.clone(), o.scene.clone()));
+            }
+        }
+    }
+    pairs
 }
 
 /// Connects, retrying with capped exponential backoff until it succeeds or

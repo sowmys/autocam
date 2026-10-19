@@ -67,20 +67,18 @@ enum Cmd {
         #[arg(long)]
         skip_down: bool,
     },
-    /// Print live head pose and scores for both cameras.
+    /// Mouse: live display -> camera. Face: live head pose and scores per camera.
     Watch {
         #[arg(long)]
         seconds: Option<u64>,
     },
-    /// Create LeftCam/RightCam scenes and camera inputs in OBS.
+    /// Create one OBS scene and camera input per camera.
     ObsSetup {
-        /// Substring of the left camera's device name.
-        #[arg(long)]
-        left_device: String,
-        /// Substring of the right camera's device name. Omit to simulate a
-        /// second camera by re-using the left one.
-        #[arg(long)]
-        right_device: Option<String>,
+        /// `NAME=DEVICE`, once per camera in order, e.g.
+        /// `--camera left=dell --camera laptop=integrated --camera right=logitech`.
+        /// DEVICE is part of the device name as OBS lists it.
+        #[arg(long = "camera", value_parser = parse_assignment, required = true)]
+        cameras: Vec<(String, String)>,
         /// OBS canvas/output size and preferred camera resolution.
         #[arg(long, default_value = "1920x1080")]
         resolution: String,
@@ -89,6 +87,9 @@ enum Cmd {
     Simulate {
         #[arg(long, default_value_t = 2.0)]
         hours: f32,
+        /// Number of cameras/monitors to simulate (default: as configured).
+        #[arg(long)]
+        cameras: Option<usize>,
         #[arg(long, default_value_t = 1)]
         seed: u64,
         /// Comma-separated pose noise levels to sweep, degrees.
@@ -109,17 +110,25 @@ enum Cmd {
     /// List displays, the mouse mapping, and where the cursor is.
     Monitors,
     /// Choose which displays select which camera (mouse detector).
-    /// Interactive unless --left/--right are given.
+    /// Interactive unless --assign is given.
     MapMonitors {
-        /// Comma-separated displays for the left camera, e.g. `DISPLAY2`.
-        #[arg(long)]
-        left: Option<String>,
-        /// Comma-separated displays for the right camera, e.g. `DISPLAY1`.
-        #[arg(long)]
-        right: Option<String>,
+        /// `CAMERA=DISPLAY[,DISPLAY]`, e.g. `--assign left=DISPLAY2
+        /// --assign laptop=DISPLAY1`. CAMERA is a name or number. Displays not
+        /// assigned keep the current camera.
+        #[arg(long = "assign", value_parser = parse_assignment)]
+        assign: Vec<(String, String)>,
     },
     /// Show the config path and effective configuration (password redacted).
     Config,
+}
+
+fn parse_assignment(s: &str) -> Result<(String, String), String> {
+    match s.split_once('=') {
+        Some((k, v)) if !k.trim().is_empty() && !v.trim().is_empty() => {
+            Ok((k.trim().to_owned(), v.trim().to_owned()))
+        }
+        _ => Err(format!("`{s}` is not NAME=VALUE")),
+    }
 }
 
 fn parse_detector(s: &str) -> Result<DetectorKind, String> {
@@ -201,26 +210,36 @@ async fn main() -> Result<()> {
             DetectorKind::Face => calibrate::watch(&cfg, seconds).await,
         },
         Cmd::Monitors => monitors::list(&cfg),
-        Cmd::MapMonitors { left, right } => {
-            monitors::map(&config_path, left.as_deref(), right.as_deref()).await
-        }
+        Cmd::MapMonitors { assign } => monitors::map(&config_path, &assign).await,
         Cmd::ObsSetup {
-            left_device,
-            right_device,
+            cameras,
             resolution,
         } => {
             let res = obs::parse_resolution(&resolution)
                 .with_context(|| format!("--resolution `{resolution}` is not WIDTHxHEIGHT"))?;
             let o = obs::Obs::connect(&cfg.obs).await?;
-            o.setup_scenes(&mut cfg, &left_device, right_device.as_deref(), res)
-                .await?;
+            o.setup_scenes(&mut cfg, &cameras, res).await?;
             let mut on_disk = Config::load(&config_path)?;
+            let camera_count_changed = on_disk.cameras.len() != cfg.cameras.len();
             on_disk.cameras = cfg.cameras.clone();
             on_disk.save(&config_path)?;
             println!(
-                "OBS scenes ready; camera mapping saved to {}",
+                "OBS scenes ready; cameras saved to {}:",
                 config_path.display()
             );
+            for (i, c) in cfg.cameras.iter().enumerate() {
+                println!(
+                    "  {} {:<10} input `{}`  scene `{}`  displays [{}]",
+                    i + 1,
+                    c.name,
+                    c.source,
+                    c.scene,
+                    c.monitors.join(", ")
+                );
+            }
+            if camera_count_changed || cfg.cameras.iter().any(|c| c.monitors.is_empty()) {
+                println!("next: run `autocam map-monitors` to choose each camera's display");
+            }
             Ok(())
         }
         Cmd::Simulate {
@@ -231,7 +250,11 @@ async fn main() -> Result<()> {
             dropout_p,
             strict,
             json,
+            cameras,
         } => {
+            let cameras = cameras
+                .unwrap_or(cfg.cameras.len())
+                .clamp(2, autocam::MAX_CAMERAS);
             let decision = cfg.switching.decision();
             let mut switch = cfg.switching.params();
             if strict {
@@ -248,7 +271,7 @@ async fn main() -> Result<()> {
                             noise_deg,
                             outlier_p,
                             dropout_p,
-                            ..Default::default()
+                            ..simulate::SimParams::for_cameras(cameras)
                         },
                         decision,
                         switch,
@@ -264,12 +287,12 @@ async fn main() -> Result<()> {
         Cmd::Reactivate => {
             let o = obs::Obs::connect(&cfg.obs).await?;
             let inputs = o.input_names().await?;
-            let mut sources = vec![
-                cfg.cameras.left.source.clone(),
-                cfg.cameras.right.source.clone(),
-            ];
-            sources.dedup();
-            for s in sources.iter().filter(|s| inputs.contains(s)) {
+            for s in cfg
+                .cameras
+                .iter()
+                .map(|c| &c.source)
+                .filter(|s| inputs.contains(s))
+            {
                 o.reactivate_camera(s).await?;
                 println!("re-opened `{s}`");
             }
